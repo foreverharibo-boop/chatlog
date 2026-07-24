@@ -14,6 +14,21 @@ const loadJson = (p, fb) => {
 
 // ── 연결 프로필 해석 ──────────────────────────────────────
 function resolveTextApi(settings) {
+    // Express 모드 — 이미지와 동일한 키/프로젝트로 텍스트도 호출한다.
+    // 정식 Vertex 프로필은 서비스 계정 OAuth가 필요해서 API 키로는 401이 난다.
+    if (settings.textMode === 'express') {
+        if (!settings.imageApiKey) return null;
+        return {
+            name: 'express',
+            source: 'vertexai',
+            model: settings.textModel || 'gemini-2.5-flash',
+            apiKey: settings.imageApiKey,
+            provider: settings.imageProvider === 'aistudio' ? 'aistudio' : 'vertex',
+            projectId: settings.imageProjectId || '',
+            region: settings.imageRegion || 'global',
+        };
+    }
+
     const userDir = path.join(ST_ROOT, 'data', settings.userHandle || 'default-user');
     const stSettings = loadJson(path.join(userDir, 'settings.json'), {});
     const secrets = loadJson(path.join(userDir, 'secrets.json'), {});
@@ -187,8 +202,8 @@ async function callOpenAiCompatible(api, { system, user, image }) {
 }
 
 async function callText(api, payload) {
-    if (!api?.apiKey) throw new Error('API 키를 찾을 수 없음 (secrets.json 확인)');
-    if (api.source === 'makersuite' || /gemini/i.test(api.model || '')) {
+    if (!api?.apiKey) throw new Error('API 키를 찾을 수 없음 (Express 키 또는 secrets.json 확인)');
+    if (api.provider === 'vertex' || api.source === 'makersuite' || /gemini/i.test(api.model || '')) {
         return callGemini(api, payload);
     }
     return callOpenAiCompatible(api, payload);

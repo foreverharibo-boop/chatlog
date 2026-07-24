@@ -50,6 +50,17 @@ const SETTINGS_HTML = `
       <b>챗로그</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
     </div>
     <div class="inline-drawer-content">
+      <label for="chatlog-textmode">텍스트 생성 방식</label>
+      <select id="chatlog-textmode" class="text_pole">
+        <option value="express">이미지와 같은 Express 키 사용 (권장)</option>
+        <option value="profile">ST 연결 프로필 사용</option>
+      </select>
+
+      <div id="chatlog-textmodel-row">
+        <label for="chatlog-text-model">텍스트 모델</label>
+        <input id="chatlog-text-model" type="text" class="text_pole" placeholder="gemini-2.5-flash">
+      </div>
+
       <label for="chatlog-profile">연결 프로필 (텍스트)</label>
       <div class="chatlog-row">
         <select id="chatlog-profile" class="text_pole"></select>
@@ -181,7 +192,15 @@ const FALLBACK_SETTINGS = {
     commentDelayMinMin: 1, commentDelayMaxMin: 30,
     autoCleanup: false, cleanupAfterDays: 1, keepSaved: true,
     imageProvider: 'vertex', imageProjectId: '', imageRegion: 'global',
+    textMode: 'express', textModel: 'gemini-2.5-flash',
 };
+
+function toggleTextMode() {
+    const express = $('#chatlog-textmode').val() === 'express';
+    $('#chatlog-textmodel-row').toggle(express);
+    $('#chatlog-profile').closest('.chatlog-row').toggle(!express);
+    $('#chatlog-profile-count').toggle(!express);
+}
 
 function toggleVertexFields() {
     $('#chatlog-vertex-fields').toggle($('#chatlog-image-provider').val() === 'vertex');
@@ -225,6 +244,9 @@ async function loadSettingsUi() {
     $('#chatlog-image-project').val(s.imageProjectId || '');
     $('#chatlog-image-region').val(s.imageRegion || 'global');
     toggleVertexFields();
+    $('#chatlog-textmode').val(s.textMode || 'express');
+    $('#chatlog-text-model').val(s.textModel || 'gemini-2.5-flash');
+    toggleTextMode();
     $('#chatlog-delay-min').val(s.commentDelayMinMin);
     $('#chatlog-delay-max').val(s.commentDelayMaxMin);
     $('#chatlog-autoclean').prop('checked', !!s.autoCleanup);
@@ -264,6 +286,8 @@ async function saveSettingsUi() {
         imageProvider: $('#chatlog-image-provider').val(),
         imageProjectId: $('#chatlog-image-project').val().trim(),
         imageRegion: $('#chatlog-image-region').val().trim() || 'global',
+        textMode: $('#chatlog-textmode').val(),
+        textModel: $('#chatlog-text-model').val().trim() || 'gemini-2.5-flash',
         commentDelayMinMin: Number($('#chatlog-delay-min').val()),
         commentDelayMaxMin: Number($('#chatlog-delay-max').val()),
         userPersonaName: ctx().name1 || '',
@@ -930,6 +954,7 @@ jQuery(async () => {
         const n = refreshProfileSelect().length;
         toastr?.info?.(n ? `연결 프로필 ${n}개` : '연결 프로필을 못 찾았어요');
     });
+    $('#chatlog-textmode').on('change', toggleTextMode);
     $('#chatlog-image-provider').on('change', toggleVertexFields);
     $('#chatlog-image-model').on('change', function () {
         $('#chatlog-image-model-custom').toggle(this.value === '__custom');

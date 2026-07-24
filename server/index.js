@@ -29,6 +29,8 @@ let settings = {
     profileName: '',        // ST 연결 프로필 이름 (텍스트 생성용)
     userHandle: 'default-user',
     imageApiKey: '',        // 이미지 생성 키만 별도
+    textMode: 'express',                         // 'express' = 이미지와 같은 키로 텍스트도 생성 | 'profile' = ST 연결 프로필
+    textModel: 'gemini-2.5-flash',               // express 모드에서 쓸 텍스트 모델
     imageProvider: 'vertex',                     // 'vertex' (Express) | 'aistudio'
     imageModel: 'gemini-3.1-flash-lite-image',   // 나노바나나 2 Lite
     imageProjectId: '',                          // Vertex 프로젝트 ID
