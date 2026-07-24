@@ -26,6 +26,9 @@ let settings = {
     userPersonaName: '',    // 유저 페르소나 이름 (클라이언트가 동기화)
     commentDelayMinMin: 1,
     commentDelayMaxMin: 30,
+    autoCleanup: false,       // 지난 날 이미지/게시물 자동 삭제
+    cleanupAfterDays: 1,      // 며칠 지난 것부터 지울지
+    keepSaved: true,          // 저장 표시한 건 남기기
 };
 
 function loadJson(p, fallback) {
@@ -130,6 +133,49 @@ async function runJob(job) {
     }
 }
 
+// ── 자동 정리 ─────────────────────────────────────────────
+function removeImageFile(webPath) {
+    if (!webPath || !webPath.includes('/chatlog/')) return;
+    try {
+        fs.unlinkSync(path.join(ST_ROOT, 'public', webPath.replace(/^\/+/, '')));
+    } catch { /* 이미 없으면 무시 */ }
+}
+
+let lastCleanup = 0;
+function runCleanup() {
+    if (!settings.autoCleanup) return;
+
+    const cutoff = new Date();
+    cutoff.setHours(0, 0, 0, 0);
+    cutoff.setDate(cutoff.getDate() - Math.max(0, settings.cleanupAfterDays));
+    const cutoffTs = cutoff.getTime();
+
+    let removed = 0;
+    for (const roomId of Object.keys(db.posts)) {
+        db.posts[roomId] = db.posts[roomId].filter(p => {
+            if (p.createdAt >= cutoffTs) return true;
+            if (settings.keepSaved && p.saved) return true;
+            removeImageFile(p.image);
+            removed++;
+            return false;
+        });
+    }
+
+    // 하루로그 내보내기 파일도 같이 정리
+    const exportDir = path.join(ST_ROOT, 'public', 'user', 'images', 'chatlog', 'daylog');
+    try {
+        for (const f of fs.readdirSync(exportDir)) {
+            const fp = path.join(exportDir, f);
+            if (fs.statSync(fp).mtimeMs < cutoffTs) { fs.unlinkSync(fp); removed++; }
+        }
+    } catch { /* 폴더 없으면 무시 */ }
+
+    if (removed) {
+        console.log(`[chatlog] 자동 정리: ${removed}건 삭제`);
+        saveDb();
+    }
+}
+
 // ── 매분 틱 ───────────────────────────────────────────────
 let ticking = false;
 async function tick() {
@@ -161,6 +207,12 @@ async function tick() {
                 catch (e) { console.error('[chatlog] 작업 실패:', job.type, e.message); }
             }
         }
+        // 자동 정리는 하루 한 번만
+        if (now - lastCleanup > 6 * 3600 * 1000) {
+            lastCleanup = now;
+            runCleanup();
+        }
+
         saveDb();
     } finally {
         ticking = false;
@@ -240,6 +292,66 @@ async function init(router) {
             p.comments.forEach(c => { c.read = true; });
         }
         saveDb();
+        res.json({ ok: true });
+    });
+
+    // 클라이언트가 대기 댓글 작업을 가져감 (가져가면 큐에서 제거)
+    router.post('/jobs/claim', (req, res) => {
+        const { roomId, type = 'comment' } = req.body || {};
+        const claimed = db.jobs.filter(j => j.type === type && (!roomId || j.roomId === roomId));
+        db.jobs = db.jobs.filter(j => !claimed.includes(j));
+        saveDb();
+
+        res.json(claimed.map(j => {
+            const room = db.rooms[j.roomId];
+            const member = room?.members.find(m => m.avatar === j.charId);
+            const post = j.postId ? findPost(j.roomId, j.postId) : null;
+            return { ...j, member, post, roomName: room?.name };
+        }));
+    });
+
+    // 클라이언트가 생성한 댓글을 되돌려 넣음
+    router.post('/comment/push', (req, res) => {
+        const { roomId, postId, charId, charName, text } = req.body || {};
+        const post = findPost(roomId, postId);
+        if (!post) return res.status(404).json({ error: 'post not found' });
+        post.comments.push({
+            id: uid('c'), author: charId, authorName: charName,
+            text, createdAt: Date.now(), read: false,
+        });
+        saveDb();
+        res.json({ ok: true });
+    });
+
+    // 저장 표시 토글 (자동 정리에서 제외)
+    router.post('/save', (req, res) => {
+        const { roomId, postId, saved = true } = req.body || {};
+        const post = findPost(roomId, postId);
+        if (!post) return res.status(404).json({ error: 'post not found' });
+        post.saved = !!saved;
+        saveDb();
+        res.json({ ok: true, saved: post.saved });
+    });
+
+    // 게시물 삭제
+    router.post('/delete', (req, res) => {
+        const { roomId, postId } = req.body || {};
+        const list = db.posts[roomId] || [];
+        const i = list.findIndex(p => p.id === postId);
+        if (i < 0) return res.status(404).json({ error: 'post not found' });
+        removeImageFile(list[i].image);
+        list.splice(i, 1);
+        saveDb();
+        res.json({ ok: true });
+    });
+
+    // 수동 정리
+    router.post('/cleanup', (req, res) => {
+        const force = req.body?.force;
+        const prev = settings.autoCleanup;
+        if (force) settings.autoCleanup = true;
+        runCleanup();
+        settings.autoCleanup = prev;
         res.json({ ok: true });
     });
 

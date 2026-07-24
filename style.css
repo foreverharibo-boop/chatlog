@@ -381,3 +381,33 @@ html > .chatlog-sheet * {
 .chatlog-settings .chatlog-actions { margin-top: 12px; }
 .chatlog-settings small { display: block; opacity: 0.6; margin: 2px 0 8px; line-height: 1.35; }
 .chatlog-settings label { display: block; margin-top: 10px; font-weight: 600; }
+
+/* ── 게시물 액션 ───────────────────────────────────────── */
+.chatlog-postactions {
+    display: flex;
+    gap: 14px;
+    padding: 9px 8px 0;
+    font-size: 0.76em;
+    opacity: 0.42;
+}
+.chatlog-act { cursor: pointer; }
+.chatlog-act:hover { opacity: 1; }
+.chatlog-act.on { opacity: 1; color: #ffcf5c; }
+.chatlog-postactions [data-act="del"] { margin-left: auto; }
+
+/* ── 진행 표시 ─────────────────────────────────────────── */
+.chatlog-progress {
+    text-align: center;
+    font-size: 0.78em;
+    opacity: 0.5;
+    min-height: 16px;
+    margin-top: 8px;
+}
+.chatlog-export.busy { opacity: 0.5; pointer-events: none; }
+.chatlog-export.disabled { opacity: 0.3; pointer-events: none; }
+
+/* 설정 탭 프로필 새로고침 버튼 */
+.chatlog-settings #chatlog-profile-refresh {
+    flex: 0 0 auto;
+    padding: 6px 10px;
+}

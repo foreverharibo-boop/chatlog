@@ -36,6 +36,7 @@ server/  →  SillyTavern/plugins/chatlog/
 | `/chatlog-run what=cut` | 캐릭터 컷만 지금 생성 |
 | `/chatlog-run room=우리로그` | 특정 로그만 |
 | `/chatlog-now` | 다음 슬롯 시각을 지금으로 당김 (1분 내 실행) |
+| `/chatlog-local` | 대기 댓글을 브라우저에서 조용히 생성 (채팅 UI에 안 뜸) |
 | `/chatlog-jobs` | 대기 중인 작업 목록 (콘솔에 표로 출력) |
 
 ### curl (터먹스에서 직접)
@@ -72,3 +73,23 @@ public/user/images/chatlog/     # 생성된 이미지
 
 ## 남은 작업
 프롬프트 튜닝 (`server/ai.js` 의 `generateComment`, `generateCharacterCut`)
+
+---
+
+## 저장 / 정리
+
+- 게시물 하단 **저장** — 사진 파일 다운로드
+- 게시물 하단 **보관** — 자동 삭제 대상에서 제외
+- 하루로그 → **움짤 저장** — 그날 사진을 webm 영상으로 내보내기 (컷당 0.7초, 켄번스 줌)
+- 확장 탭 → **지난 기록 자동 삭제** — N일 지난 게시물·사진·하루로그 영상 일괄 삭제 (하루 한 번 자동, 또는 "지금 정리")
+
+---
+
+## 생성 경로
+
+| 상황 | 사용 API | 채팅 UI |
+|---|---|---|
+| 서버 스케줄러 (기본) | `server/ai.js` 직접 호출 | 안 뜸 |
+| `/chatlog-local` | `ConnectionManagerRequestService` | 안 뜸 |
+
+둘 다 활성 연결 프로필을 바꾸지 않습니다.

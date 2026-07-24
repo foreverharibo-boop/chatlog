@@ -51,8 +51,13 @@ const SETTINGS_HTML = `
     </div>
     <div class="inline-drawer-content">
       <label for="chatlog-profile">연결 프로필 (텍스트)</label>
-      <select id="chatlog-profile" class="text_pole"></select>
-      <small>서버가 이 프로필의 모델·키를 직접 읽어서 씁니다.</small>
+      <div class="chatlog-row">
+        <select id="chatlog-profile" class="text_pole"></select>
+        <div id="chatlog-profile-refresh" class="menu_button fa-solid fa-rotate" title="목록 새로고침"></div>
+      </div>
+      <small id="chatlog-profile-count"></small>
+
+      <small>서버가 이 프로필의 모델·키를 직접 읽어서 씁니다. 브라우저에서 돌릴 때도 이 프로필로 조용히 요청하며, 활성 프로필은 바뀌지 않습니다.</small>
 
       <label for="chatlog-image-key">이미지 생성 API 키</label>
       <input id="chatlog-image-key" type="password" class="text_pole" placeholder="이미지 전용 키">
@@ -86,6 +91,24 @@ const SETTINGS_HTML = `
         <input id="chatlog-delay-max" type="number" min="1" max="600" class="text_pole">
       </div>
 
+      <hr>
+      <label class="checkbox_label">
+        <input id="chatlog-autoclean" type="checkbox">
+        <span>지난 기록 자동 삭제</span>
+      </label>
+      <div class="chatlog-row">
+        <input id="chatlog-cleandays" type="number" min="0" max="30" class="text_pole">
+        <span>일 지나면 삭제</span>
+      </div>
+      <label class="checkbox_label">
+        <input id="chatlog-keepsaved" type="checkbox">
+        <span>저장 표시한 건 남기기</span>
+      </label>
+      <small>사진 파일과 하루로그 영상까지 같이 지웁니다. 0일이면 오늘 것만 남아요.</small>
+      <div class="chatlog-row">
+        <div id="chatlog-cleannow" class="menu_button">지금 정리</div>
+      </div>
+
       <div class="chatlog-row chatlog-actions">
         <div id="chatlog-save" class="menu_button">저장</div>
         <div id="chatlog-open" class="menu_button">챗로그 열기</div>
@@ -94,17 +117,37 @@ const SETTINGS_HTML = `
   </div>
 </div>`;
 
+function getProfiles() {
+    const c = ctx();
+    // ST 버전에 따라 위치가 다름 — 순서대로 시도
+    return c?.extensionSettings?.connectionManager?.profiles
+        || c?.extensionSettings?.['connection-manager']?.profiles
+        || window.extension_settings?.connectionManager?.profiles
+        || [];
+}
+
+function refreshProfileSelect(selected) {
+    const profiles = getProfiles();
+    const $sel = $('#chatlog-profile');
+    const keep = selected ?? $sel.val();
+    $sel.empty().append('<option value="">-- 선택 --</option>');
+    profiles.forEach(p => $sel.append($('<option>').val(p.name).text(p.name)));
+    if (keep && profiles.some(p => p.name === keep)) $sel.val(keep);
+    $('#chatlog-profile-count').text(profiles.length ? `${profiles.length}개 감지됨` : '프로필을 못 찾았어요');
+    return profiles;
+}
+
 async function loadSettingsUi() {
     const s = await api('/settings');
-    const profiles = ctx()?.extensionSettings?.connectionManager?.profiles || [];
-    const $sel = $('#chatlog-profile').empty().append('<option value="">-- 선택 --</option>');
-    profiles.forEach(p => $sel.append($('<option>').val(p.name).text(p.name)));
-    $sel.val(s.profileName || '');
+    refreshProfileSelect(s.profileName);
 
     $('#chatlog-image-key').val(s.imageApiKey || '');
     $('#chatlog-image-model').val(s.imageModel || '');
     $('#chatlog-delay-min').val(s.commentDelayMinMin);
     $('#chatlog-delay-max').val(s.commentDelayMaxMin);
+    $('#chatlog-autoclean').prop('checked', !!s.autoCleanup);
+    $('#chatlog-cleandays').val(s.cleanupAfterDays);
+    $('#chatlog-keepsaved').prop('checked', !!s.keepSaved);
 
     defaultSchedule = JSON.parse(localStorage.getItem('chatlog_schedule') || 'null') || defaultSchedule;
     $('#chatlog-active-from').val(defaultSchedule.activeFrom);
@@ -138,7 +181,11 @@ async function saveSettingsUi() {
         commentDelayMinMin: Number($('#chatlog-delay-min').val()),
         commentDelayMaxMin: Number($('#chatlog-delay-max').val()),
         userPersonaName: ctx().name1 || '',
+        autoCleanup: $('#chatlog-autoclean').is(':checked'),
+        cleanupAfterDays: Number($('#chatlog-cleandays').val()),
+        keepSaved: $('#chatlog-keepsaved').is(':checked'),
     });
+
 
     const { rooms } = await api('/state');
     for (const room of Object.values(rooms)) {
@@ -270,8 +317,8 @@ function postCard(p) {
         <div class="chatlog-cbubble"><b>${esc(c.authorName || c.author)}</b> ${esc(c.text)}</div>
       </div>`).join('');
 
-    return $(`
-      <article class="chatlog-post">
+    const $card = $(`
+      <article class="chatlog-post" data-post="${p.id}">
         <div class="chatlog-frame">
           ${p.image ? `<img class="chatlog-photo" src="${esc(p.image)}">` : '<div class="chatlog-photo chatlog-nophoto"></div>'}
           <span class="chatlog-stamp">${timeLabel(p.createdAt)}</span>
@@ -281,7 +328,32 @@ function postCard(p) {
           ${p.text ? `<div class="chatlog-caption">${esc(p.text)}</div>` : ''}
         </div>
         ${comments ? `<div class="chatlog-comments">${comments}</div>` : ''}
+        <div class="chatlog-postactions">
+          ${p.image ? '<span class="chatlog-act" data-act="save"><span class="fa-solid fa-download"></span> 저장</span>' : ''}
+          <span class="chatlog-act${p.saved ? ' on' : ''}" data-act="keep">
+            <span class="fa-solid fa-thumbtack"></span> ${p.saved ? '보관됨' : '보관'}
+          </span>
+          <span class="chatlog-act" data-act="del"><span class="fa-solid fa-trash"></span></span>
+        </div>
       </article>`);
+
+    $card.find('[data-act=save]').on('click', async () => {
+        try { await downloadUrl(p.image, `chatlog_${dayKey(p.createdAt)}_${p.id}.png`); }
+        catch (e) { toastr?.error?.('저장 실패: ' + e.message); }
+    });
+
+    $card.find('[data-act=keep]').on('click', async () => {
+        await api('/save', { roomId: p.roomId, postId: p.id, saved: !p.saved });
+        refresh();
+    });
+
+    $card.find('[data-act=del]').on('click', async () => {
+        if (!confirm('이 게시물을 지울까요? 사진도 같이 삭제됩니다.')) return;
+        await api('/delete', { roomId: p.roomId, postId: p.id });
+        refresh();
+    });
+
+    return $card;
 }
 
 // ── 올리기 ────────────────────────────────────────────────
@@ -365,8 +437,10 @@ function dayLogView(room) {
           <div class="chatlog-sheet-title">하루로그</div>
           <div class="chatlog-grid"></div>
           <div class="chatlog-sheet-actions">
+            <div class="menu_button chatlog-export">움짤 저장</div>
             <div class="menu_button chatlog-cancel">닫기</div>
           </div>
+          <div class="chatlog-progress"></div>
         </div>
       </div>`);
     document.documentElement.appendChild($sheet[0]);
@@ -386,6 +460,25 @@ function dayLogView(room) {
               </div>`);
         });
     }
+
+    const $btn = $sheet.find('.chatlog-export');
+    const $prog = $sheet.find('.chatlog-progress');
+    $btn.toggleClass('disabled', !n);
+
+    $btn.on('click', async () => {
+        if (!n || $btn.hasClass('busy')) return;
+        $btn.addClass('busy').text('만드는 중...');
+        try {
+            await exportDayLogVideo(posts, room.name, (i, total) => {
+                $prog.text(`${i} / ${total}`);
+            });
+            $prog.text('저장 완료');
+        } catch (e) {
+            $prog.text('실패: ' + e.message);
+        } finally {
+            $btn.removeClass('busy').text('움짤 저장');
+        }
+    });
 
     const close = () => $sheet.remove();
     $sheet.on('click', e => { if (e.target === $sheet[0]) close(); });
@@ -432,6 +525,228 @@ async function markRead(roomId) {
     try { await api('/read', { roomId }); } catch {}
 }
 
+
+
+// ═══════════ 백그라운드 생성 (UI 안 뜸) ═══════════
+const delay = (ms) => new Promise(r => setTimeout(r, ms));
+
+/**
+ * ConnectionManagerRequestService — 확장이 연결 프로필로 요청을 보내되
+ * 활성 프로필도, 채팅 UI도 건드리지 않는 ST 내장 서비스.
+ * 이걸 쓰면 프로필 전환 자체가 필요 없고 생성 UI도 안 뜬다.
+ */
+let _cmrs = null;
+async function getRequestService() {
+    if (_cmrs) return _cmrs;
+    const c = ctx();
+    if (c.ConnectionManagerRequestService) return (_cmrs = c.ConnectionManagerRequestService);
+    try {
+        const mod = await import('/scripts/extensions/shared.js');
+        if (mod?.ConnectionManagerRequestService) return (_cmrs = mod.ConnectionManagerRequestService);
+    } catch (e) {
+        console.warn('[chatlog] shared.js 로드 실패', e);
+    }
+    return null;
+}
+
+function profileByName(name) {
+    return getProfiles().find(p => p.name === name) || null;
+}
+
+/** 조용히 한 번 생성. 실패하면 null. */
+async function quietGenerate(messages, maxTokens = 200) {
+    const svc = await getRequestService();
+    const profileName = $('#chatlog-profile').val() || (await api('/settings')).profileName;
+    const profile = profileByName(profileName);
+
+    if (!svc || !profile) {
+        console.warn('[chatlog] 백그라운드 생성 불가 — 서버 생성으로 넘기세요');
+        return null;
+    }
+
+    const res = await svc.sendRequest(profile.id, messages, maxTokens);
+    if (typeof res === 'string') return res;
+    return res?.content ?? res?.text ?? '';
+}
+
+const COMMENT_RULES = [
+    '- 댓글은 1~2문장, 40자 내외. 짧을수록 좋다.',
+    '- SNS 댓글 말투. 완결된 문장이 아니어도 된다.',
+    '- 사진이 있으면 구체적인 것 하나를 집어서 반응하라.',
+    '- 나레이션, 행동 묘사(*...*), 따옴표, 이름표 금지. 댓글 텍스트만 출력한다.',
+].join('\n');
+
+function buildCommentMessages(job) {
+    const m = job.member || {};
+    const p = job.post || {};
+
+    const system = [
+        `너는 "${m.name}"이다.`,
+        m.description ? `설명: ${m.description}` : '',
+        m.personality ? `성격: ${m.personality}` : '',
+        m.mesExample ? `말투 예시:\n${m.mesExample}` : '',
+        '',
+        `지금 "${job.roomName}" 로그에 올라온 게시물에 댓글을 단다.`,
+        COMMENT_RULES,
+    ].filter(Boolean).join('\n');
+
+    const user = [
+        `[${timeLabel(p.createdAt)} 게시물]`,
+        p.text ? `글: ${p.text}` : '(글 없음)',
+        p.image ? '(사진 첨부됨)' : '',
+        '',
+        '댓글 하나만 출력하라.',
+    ].filter(Boolean).join('\n');
+
+    return [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+    ];
+}
+
+function cleanComment(raw) {
+    return (raw || '')
+        .trim()
+        .replace(/^["'\u300c\u300e]|["'\u300d\u300f]$/g, '')
+        .replace(/^\*+|\*+$/g, '')
+        .replace(/^[^:\n]{1,20}:\s*/, '')
+        .split('\n')[0]
+        .slice(0, 120)
+        .trim();
+}
+
+/** 브라우저에서 대기 댓글 처리 — 채팅 UI에 아무것도 안 뜬다 */
+async function runLocal(roomId = null) {
+    const svc = await getRequestService();
+    if (!svc) {
+        toastr?.warning?.('백그라운드 생성 API를 못 찾았어요. /chatlog-run 으로 서버에서 돌리세요');
+        return 0;
+    }
+
+    const jobs = await api('/jobs/claim', { roomId, type: 'comment' });
+    if (!jobs.length) { toastr?.info?.('대기 중인 댓글이 없어요'); return 0; }
+
+    let ok = 0;
+    for (const job of jobs) {
+        try {
+            const raw = await quietGenerate(buildCommentMessages(job));
+            if (raw == null) throw new Error('생성 실패');
+            await api('/comment/push', {
+                roomId: job.roomId,
+                postId: job.postId,
+                charId: job.charId,
+                charName: job.member?.name,
+                text: cleanComment(raw),
+            });
+            ok++;
+        } catch (e) {
+            console.error('[chatlog] 댓글 생성 실패', job.charId, e);
+        }
+        await delay(400);   // 연타 방지
+    }
+
+    toastr?.success?.(`댓글 ${ok}개 생성`);
+    if ($overlay) refresh();
+    return ok;
+}
+
+// ═══════════ 저장 / 내보내기 ═══════════
+async function downloadUrl(url, filename) {
+    const blob = await (await fetch(url)).blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.documentElement.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+function loadImg(src) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => resolve(img);
+        img.onerror = reject;
+        img.src = src;
+    });
+}
+
+/** 하루로그를 움짤(webm)로 내보내기 — 컷당 0.7초, 켄번스 줌 */
+async function exportDayLogVideo(posts, roomName, onProgress) {
+    const W = 720, H = 960, HOLD = 700;
+    const canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    const g = canvas.getContext('2d');
+
+    const stream = canvas.captureStream(30);
+    const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
+        .find(m => MediaRecorder.isTypeSupported(m));
+    if (!mime) throw new Error('이 브라우저는 영상 녹화를 지원하지 않아요');
+
+    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 4_000_000 });
+    const chunks = [];
+    rec.ondataavailable = e => e.data.size && chunks.push(e.data);
+    const done = new Promise(r => { rec.onstop = r; });
+    rec.start();
+
+    for (let i = 0; i < posts.length; i++) {
+        const p = posts[i];
+        onProgress?.(i + 1, posts.length);
+        let img;
+        try { img = await loadImg(p.image); } catch { continue; }
+
+        const start = performance.now();
+        await new Promise(resolve => {
+            const draw = () => {
+                const t = Math.min(1, (performance.now() - start) / HOLD);
+                const zoom = 1.04 + t * 0.05;               // 느린 줌인
+                const dw = W * zoom, dh = H * zoom;
+
+                g.fillStyle = '#000';
+                g.fillRect(0, 0, W, H);
+
+                // cover 맞춤
+                const scale = Math.max(dw / img.width, dh / img.height);
+                const iw = img.width * scale, ih = img.height * scale;
+                g.drawImage(img, (W - iw) / 2, (H - ih) / 2, iw, ih);
+
+                // 시간 스탬프
+                g.fillStyle = 'rgba(0,0,0,0.55)';
+                g.roundRect?.(24, 24, 190, 52, 26);
+                g.fill();
+                g.fillStyle = '#fff';
+                g.font = '600 28px -apple-system, sans-serif';
+                g.textBaseline = 'middle';
+                g.fillText(timeLabel(p.createdAt), 44, 51);
+
+                if (p.text) {
+                    g.fillStyle = 'rgba(0,0,0,0.6)';
+                    g.fillRect(0, H - 110, W, 110);
+                    g.fillStyle = '#fff';
+                    g.font = '550 32px -apple-system, sans-serif';
+                    g.fillText(p.text.slice(0, 24), 40, H - 55);
+                }
+
+                if (t >= 1) resolve();
+                else requestAnimationFrame(draw);
+            };
+            draw();
+        });
+    }
+
+    rec.stop();
+    await done;
+
+    const blob = new Blob(chunks, { type: mime });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `daylog_${roomName}_${dayKey(Date.now())}.webm`;
+    document.documentElement.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+}
 
 // ── 슬래시 커맨드 ─────────────────────────────────────────
 function registerSlashCommands() {
@@ -486,6 +801,17 @@ function registerSlashCommands() {
     }));
 
     P.addCommandObject(Cmd.fromProps({
+        name: 'chatlog-local',
+        helpString: '대기 댓글을 브라우저에서 조용히 생성 (채팅 UI에 안 뜸)',
+        namedArgumentList: [Arg?.fromProps?.({ name: 'room', description: '로그 이름', isRequired: false })].filter(Boolean),
+        callback: async (args) => {
+            await ensureState();
+            const n = await runLocal(roomIdByName(args.room));
+            return String(n);
+        },
+    }));
+
+    P.addCommandObject(Cmd.fromProps({
         name: 'chatlog-jobs',
         helpString: '대기 중인 작업 목록',
         callback: async () => {
@@ -502,6 +828,18 @@ jQuery(async () => {
     $('#extensions_settings2').append(SETTINGS_HTML);
     $('#chatlog-save').on('click', saveSettingsUi);
     $('#chatlog-open').on('click', openChatlog);
+    $('#chatlog-profile-refresh').on('click', () => {
+        const n = refreshProfileSelect().length;
+        toastr?.info?.(n ? `연결 프로필 ${n}개` : '연결 프로필을 못 찾았어요');
+    });
+    $('#chatlog-cleannow').on('click', async () => {
+        if (!confirm('지난 기록을 지금 정리할까요?')) return;
+        await api('/cleanup', { force: true });
+        toastr?.success?.('정리 완료');
+        if ($overlay) refresh();
+    });
+    // 확장 설정 드로어를 열 때마다 프로필 목록 갱신
+    $(document).on('click', '.chatlog-settings .inline-drawer-toggle', () => setTimeout(() => refreshProfileSelect(), 50));
     $(document).on('input', '#chatlog-active-from, #chatlog-active-to, #chatlog-interval', updateCostHint);
     await loadSettingsUi();
     registerSlashCommands();
