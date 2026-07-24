@@ -152,14 +152,26 @@ function getProfiles() {
         || [];
 }
 
+// 서버에 저장된 프로필 이름. 목록 로딩이 늦어도 이 값은 안 잃는다.
+let savedProfileName = '';
+
 function refreshProfileSelect(selected) {
     const profiles = getProfiles();
     const $sel = $('#chatlog-profile');
-    const keep = selected ?? $sel.val();
+
+    if (selected !== undefined) savedProfileName = selected || '';
+    const keep = $sel.val() || savedProfileName;
+
     $sel.empty().append('<option value="">-- 선택 --</option>');
     profiles.forEach(p => $sel.append($('<option>').val(p.name).text(p.name)));
-    if (keep && profiles.some(p => p.name === keep)) $sel.val(keep);
-    $('#chatlog-profile-count').text(profiles.length ? `${profiles.length}개 감지됨` : '프로필을 못 찾았어요');
+
+    // 목록에 아직 없어도 저장된 이름은 옵션으로 유지 (안 그러면 저장할 때 빈 값이 덮어씀)
+    if (keep && !profiles.some(p => p.name === keep)) {
+        $sel.append($('<option>').val(keep).text(`${keep} (목록 로딩 대기)`));
+    }
+    if (keep) $sel.val(keep);
+
+    $('#chatlog-profile-count').text(profiles.length ? `${profiles.length}개 감지됨` : '프로필 목록 로딩 중...');
     return profiles;
 }
 
@@ -202,7 +214,11 @@ async function loadSettingsUi() {
     }
     refreshProfileSelect(s.profileName);
 
-    $('#chatlog-image-key').val(s.imageApiKey || '');
+    if (s.imageApiKey) {
+        $('#chatlog-image-key').val('').attr('placeholder', '저장돼 있음 — 바꿀 때만 입력');
+    } else {
+        $('#chatlog-image-key').val('').attr('placeholder', '이미지 전용 키');
+    }
     setImageModel(s.imageModel);
     $('#chatlog-image-provider').val(s.imageProvider || 'vertex');
     $('#chatlog-image-project').val(s.imageProjectId || '');
@@ -239,9 +255,10 @@ async function saveSettingsUi() {
     };
     localStorage.setItem('chatlog_schedule', JSON.stringify(defaultSchedule));
 
+    const typedKey = $('#chatlog-image-key').val().trim();
     await api('/settings', {
         profileName: $('#chatlog-profile').val(),
-        imageApiKey: $('#chatlog-image-key').val(),
+        ...(typedKey ? { imageApiKey: typedKey } : {}),
         imageModel: readImageModel(),
         imageProvider: $('#chatlog-image-provider').val(),
         imageProjectId: $('#chatlog-image-project').val().trim(),
@@ -909,8 +926,9 @@ jQuery(async () => {
     $('#chatlog-test-image').on('click', async () => {
         const $r = $('#chatlog-test-result').text('생성 중...');
         try {
+            const k = $('#chatlog-image-key').val().trim();
             await api('/settings', {
-                imageApiKey: $('#chatlog-image-key').val(),
+                ...(k ? { imageApiKey: k } : {}),
                 imageModel: readImageModel(),
                 imageProvider: $('#chatlog-image-provider').val(),
                 imageProjectId: $('#chatlog-image-project').val().trim(),
@@ -932,6 +950,16 @@ jQuery(async () => {
     $(document).on('click', '.chatlog-settings .inline-drawer-toggle', () => setTimeout(() => refreshProfileSelect(), 50));
     $(document).on('input', '#chatlog-active-from, #chatlog-active-to, #chatlog-interval', updateCostHint);
     await loadSettingsUi();
+
+    // 연결 프로필 목록은 ST가 늦게 채우는 경우가 있어 몇 번 더 확인한다
+    const c0 = ctx();
+    if (c0.eventSource && c0.eventTypes?.APP_READY) {
+        c0.eventSource.on(c0.eventTypes.APP_READY, () => refreshProfileSelect());
+    }
+    [500, 1500, 4000].forEach(ms => setTimeout(() => {
+        if (getProfiles().length) refreshProfileSelect();
+    }, ms));
+
     registerSlashCommands();
     console.log('[chatlog] 로드됨');
 });

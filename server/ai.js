@@ -35,6 +35,64 @@ function resolveTextApi(settings) {
     };
 }
 
+// ── 캐릭터 프사 읽기 (폴라로이드 패턴: 외모 일관성용 레퍼런스) ──
+function readAvatar(settings, avatarFile) {
+    if (!avatarFile) return null;
+    const userDir = path.join(ST_ROOT, 'data', settings.userHandle || 'default-user');
+    const candidates = [
+        path.join(userDir, 'characters', avatarFile),
+        path.join(ST_ROOT, 'public', 'characters', avatarFile),
+    ];
+    for (const p of candidates) {
+        try {
+            const buf = fs.readFileSync(p);
+            return { mime: 'image/png', data: buf.toString('base64') };
+        } catch { /* 다음 후보 */ }
+    }
+    console.warn('[chatlog] 프사를 못 찾음:', avatarFile);
+    return null;
+}
+
+// ── 최근 대화 읽기 ────────────────────────────────────────
+/**
+ * data/<user>/chats/<캐릭터명>/ 안에서 가장 최근 .jsonl 을 열어 마지막 N개 발화를 뽑는다.
+ * 캐릭터가 "요즘 뭐 하고 지내는지"를 컷에 반영하기 위한 것.
+ */
+function readRecentChat(settings, charName, limit = 12) {
+    if (!charName) return '';
+    const dir = path.join(ST_ROOT, 'data', settings.userHandle || 'default-user', 'chats', charName);
+
+    let files;
+    try {
+        files = fs.readdirSync(dir)
+            .filter(f => f.endsWith('.jsonl'))
+            .map(f => ({ f, t: fs.statSync(path.join(dir, f)).mtimeMs }))
+            .sort((a, b) => b.t - a.t);
+    } catch {
+        return '';
+    }
+    if (!files.length) return '';
+
+    try {
+        const lines = fs.readFileSync(path.join(dir, files[0].f), 'utf-8')
+            .split('\n')
+            .filter(Boolean);
+
+        const msgs = [];
+        for (const line of lines) {
+            try {
+                const o = JSON.parse(line);
+                if (!o.mes) continue;                 // 첫 줄은 메타데이터
+                msgs.push(`${o.name}: ${String(o.mes).replace(/\s+/g, ' ').slice(0, 200)}`);
+            } catch { /* 깨진 줄 무시 */ }
+        }
+        return msgs.slice(-limit).join('\n');
+    } catch (e) {
+        console.warn('[chatlog] 대화 읽기 실패:', e.message);
+        return '';
+    }
+}
+
 // ── 이미지 → base64 ───────────────────────────────────────
 function readImageAsBase64(webPath) {
     if (!webPath) return null;
@@ -168,10 +226,13 @@ async function generateComment(settings, room, post, member) {
     const api = resolveTextApi(settings);
     if (!api) throw new Error('연결 프로필을 찾을 수 없음');
 
+    const recent = readRecentChat(settings, member.name, 8);
+
     const system = [
         `너는 "${member.name}"이다. 아래 인물을 완전히 연기한다.`,
         '',
         charBlock(member),
+        recent ? `\n[최근 대화 — 지금 둘 사이의 분위기]\n${recent}` : '',
         '',
         '지금 너는 "챗로그"라는 앱을 쓰고 있다. 친한 사람들끼리 하루 중 아무 순간이나 사진 한 장과 짧은 글로 올리는 앱이다.',
         `${settings.userPersonaName || '유저'}가 방금 게시물을 올렸고, 너는 거기에 댓글을 단다.`,
@@ -182,7 +243,8 @@ async function generateComment(settings, room, post, member) {
         '- 사진이 있으면 사진 속 구체적인 것 하나를 집어서 반응하라. 뭉뚱그리지 마라.',
         '- 나레이션, 행동 묘사(*...*), 따옴표 금지. 댓글 텍스트만 출력한다.',
         '- 이름표나 접두사를 붙이지 마라.',
-    ].join('\n');
+        '- 최근 대화의 분위기와 호칭을 유지하라.',
+    ].filter(Boolean).join('\n');
 
     const user = [
         `[${timeLabel(post.createdAt)}에 올라온 게시물]`,
@@ -214,22 +276,35 @@ async function generateCharacterCut(settings, room, member, slotAt) {
     const api = resolveTextApi(settings);
     if (!api) throw new Error('연결 프로필을 찾을 수 없음');
 
+    const recent = readRecentChat(settings, member.name);
+
     const system = [
         `너는 "${member.name}"이다.`,
         '',
         charBlock(member),
+        recent ? `\n[최근 대화 — 지금 이 인물이 처한 상황]\n${recent}` : '',
         '',
-        '너는 "챗로그" 앱에 지금 이 순간을 올리려고 한다.',
+        '너는 "chatlog" 앱에 지금 이 순간을 올리려고 한다. 잘 찍은 사진이 아니라,',
+        '눈앞에 있는 걸 대충 한 장 찍어 올리는 앱이다.',
         '',
         'JSON만 출력한다. 마크다운 코드펜스 금지.',
-        '{"caption": "올릴 글 (25자 이내, SNS 캡션 말투)", "scene": "지금 눈앞 장면을 영어로 묘사한 이미지 프롬프트"}',
+        '{"caption": "올릴 글 (25자 이내, SNS 캡션 말투)", "scene": "사진에 담길 장면을 영어로 묘사한 이미지 프롬프트"}',
         '',
-        'scene 규칙: 1인칭 시점으로 눈앞에 보이는 것. 인물 얼굴은 넣지 않는다. 조명·장소·사물 위주로 구체적으로.',
+        'scene 규칙:',
+        '- 최근 대화 상황과 이어지는 장면이어야 한다. 뜬금없는 장소 금지.',
+        '- 이 시각에 이 인물이 실제로 있을 법한 곳, 실제로 보고 있을 법한 것.',
+        '- 폰으로 대충 찍은 스냅. 구도가 조금 어긋나도 좋다.',
+        '- 인물이 프레임에 들어와도 되고, 눈앞 풍경만 담아도 된다.',
+        '- 조명·장소·사물을 구체적으로. 추상적 표현 금지.',
+    ].filter(Boolean).join('\n');
+
+    const user = [
+        `지금은 ${timeLabel(slotAt)}이다.`,
+        '이 시각에 너는 어디서 뭘 하고 있나? JSON으로 답하라.',
     ].join('\n');
 
-    const user = `지금은 ${timeLabel(slotAt)}이다. 이 시각에 너는 무엇을 하고 있나? JSON으로 답하라.`;
-
     const raw = await callText(api, { system, user });
+
     let parsed;
     try {
         parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
@@ -239,18 +314,29 @@ async function generateCharacterCut(settings, room, member, slotAt) {
 
     let image = null;
     if (parsed.scene && settings.imageApiKey) {
-        try { image = await generateImage(settings, parsed.scene); }
-        catch (e) { console.error('[chatlog] 이미지 생성 실패:', e.message); }
+        try {
+            image = await generateImage(settings, parsed.scene, readAvatar(settings, member.avatar));
+        } catch (e) {
+            console.error('[chatlog] 이미지 생성 실패:', e.message);
+        }
     }
 
     return { text: parsed.caption || '', image };
 }
 
 // ── 이미지 생성 ───────────────────────────────────────────
-async function generateImage(settings, scene) {
-    const prompt = `${scene}. Casual amateur phone snapshot, natural available light, slightly imperfect framing, no text, no watermark.`;
+async function generateImage(settings, scene, reference = null) {
+    let prompt = `${scene}. Casual amateur phone snapshot, natural available light, slightly imperfect framing, no text, no watermark.`;
+
+    if (reference) {
+        // 폴라로이드 패턴 — 프사를 외모 기준으로 고정
+        prompt += ' If a person appears in the frame, their face, hairstyle, hair color and outfit must match the attached reference image exactly. Do not invent a different person.';
+    }
 
     if (!settings.imageApiKey) throw new Error('이미지 API 키가 비어 있습니다');
+
+    const parts = [{ text: prompt }];
+    if (reference) parts.push({ inline_data: { mime_type: reference.mime, data: reference.data } });
 
     const json = await callGoogle({
         provider: settings.imageProvider === 'vertex' ? 'vertex' : 'aistudio',
@@ -259,7 +345,7 @@ async function generateImage(settings, scene) {
         projectId: settings.imageProjectId,
         region: settings.imageRegion,
     }, {
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        contents: [{ role: 'user', parts }],
     });
 
     const part = json?.candidates?.[0]?.content?.parts?.find(p => p.inline_data || p.inlineData);
@@ -275,4 +361,4 @@ async function generateImage(settings, scene) {
     return `/user/images/chatlog/${filename}`;
 }
 
-module.exports = { resolveTextApi, googleUrl, callGoogle, generateComment, generateCharacterCut, generateImage, timeLabel };
+module.exports = { resolveTextApi, googleUrl, callGoogle, readAvatar, readRecentChat, generateComment, generateCharacterCut, generateImage, timeLabel };
