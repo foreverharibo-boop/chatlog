@@ -62,8 +62,19 @@ const SETTINGS_HTML = `
       <label for="chatlog-image-key">이미지 생성 API 키</label>
       <input id="chatlog-image-key" type="password" class="text_pole" placeholder="이미지 전용 키">
 
-      <label for="chatlog-image-model">이미지 모델</label>
-      <input id="chatlog-image-model" type="text" class="text_pole">
+      <label for="chatlog-image-model">이미지 모델 (나노바나나)</label>
+      <select id="chatlog-image-model" class="text_pole">
+        <option value="gemini-3.1-flash-lite-image">나노바나나 2 Lite — 제일 싸고 빠름 (권장)</option>
+        <option value="gemini-3.1-flash-image">나노바나나 2 — 화질/속도 균형</option>
+        <option value="gemini-3-pro-image">나노바나나 Pro — 최고 화질, 비쌈</option>
+        <option value="gemini-2.5-flash-image">나노바나나 (구버전)</option>
+        <option value="__custom">직접 입력...</option>
+      </select>
+      <input id="chatlog-image-model-custom" type="text" class="text_pole" style="display:none" placeholder="모델 ID">
+      <div class="chatlog-row">
+        <div id="chatlog-test-image" class="menu_button">이미지 생성 테스트</div>
+      </div>
+      <small id="chatlog-test-result"></small>
 
       <hr>
       <label>활동 시간대</label>
@@ -137,12 +148,42 @@ function refreshProfileSelect(selected) {
     return profiles;
 }
 
+const FALLBACK_SETTINGS = {
+    profileName: '', imageApiKey: '', imageModel: 'gemini-3.1-flash-lite-image',
+    commentDelayMinMin: 1, commentDelayMaxMin: 30,
+    autoCleanup: false, cleanupAfterDays: 1, keepSaved: true,
+};
+
+function setImageModel(value) {
+    const $sel = $('#chatlog-image-model');
+    const known = $sel.find('option').map((_, o) => o.value).get();
+    if (value && !known.includes(value)) {
+        $sel.val('__custom');
+        $('#chatlog-image-model-custom').val(value).show();
+    } else {
+        $sel.val(value || 'gemini-3.1-flash-lite-image');
+        $('#chatlog-image-model-custom').hide();
+    }
+}
+
+function readImageModel() {
+    const v = $('#chatlog-image-model').val();
+    return v === '__custom' ? $('#chatlog-image-model-custom').val().trim() : v;
+}
+
 async function loadSettingsUi() {
-    const s = await api('/settings');
+    let s = FALLBACK_SETTINGS;
+    try {
+        s = { ...FALLBACK_SETTINGS, ...(await api('/settings')) };
+    } catch (e) {
+        // 서버 플러그인이 아직 안 붙었어도 UI는 정상적으로 채운다
+        console.warn('[chatlog] 설정 불러오기 실패 — 기본값 사용', e);
+        $('#chatlog-profile-count').text('서버 플러그인 응답 없음 (plugins/chatlog 확인)');
+    }
     refreshProfileSelect(s.profileName);
 
     $('#chatlog-image-key').val(s.imageApiKey || '');
-    $('#chatlog-image-model').val(s.imageModel || '');
+    setImageModel(s.imageModel);
     $('#chatlog-delay-min').val(s.commentDelayMinMin);
     $('#chatlog-delay-max').val(s.commentDelayMaxMin);
     $('#chatlog-autoclean').prop('checked', !!s.autoCleanup);
@@ -177,7 +218,7 @@ async function saveSettingsUi() {
     await api('/settings', {
         profileName: $('#chatlog-profile').val(),
         imageApiKey: $('#chatlog-image-key').val(),
-        imageModel: $('#chatlog-image-model').val(),
+        imageModel: readImageModel(),
         commentDelayMinMin: Number($('#chatlog-delay-min').val()),
         commentDelayMaxMin: Number($('#chatlog-delay-max').val()),
         userPersonaName: ctx().name1 || '',
@@ -831,6 +872,19 @@ jQuery(async () => {
     $('#chatlog-profile-refresh').on('click', () => {
         const n = refreshProfileSelect().length;
         toastr?.info?.(n ? `연결 프로필 ${n}개` : '연결 프로필을 못 찾았어요');
+    });
+    $('#chatlog-image-model').on('change', function () {
+        $('#chatlog-image-model-custom').toggle(this.value === '__custom');
+    });
+    $('#chatlog-test-image').on('click', async () => {
+        const $r = $('#chatlog-test-result').text('생성 중...');
+        try {
+            await api('/settings', { imageApiKey: $('#chatlog-image-key').val(), imageModel: readImageModel() });
+            const r = await api('/test/image', {});
+            $r.html(`성공 — <a href="${r.path}" target="_blank">이미지 보기</a>`);
+        } catch (e) {
+            $r.text('실패: ' + e.message);
+        }
     });
     $('#chatlog-cleannow').on('click', async () => {
         if (!confirm('지난 기록을 지금 정리할까요?')) return;

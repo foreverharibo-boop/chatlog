@@ -22,7 +22,7 @@ let settings = {
     profileName: '',        // ST 연결 프로필 이름 (텍스트 생성용)
     userHandle: 'default-user',
     imageApiKey: '',        // 이미지 생성 키만 별도
-    imageModel: 'gemini-2.5-flash-image',
+    imageModel: 'gemini-3.1-flash-lite-image',   // 나노바나나 2 Lite
     userPersonaName: '',    // 유저 페르소나 이름 (클라이언트가 동기화)
     commentDelayMinMin: 1,
     commentDelayMaxMin: 30,
@@ -321,6 +321,17 @@ async function init(router) {
         });
         saveDb();
         res.json({ ok: true });
+    });
+
+    // 이미지 생성 테스트
+    router.post('/test/image', async (req, res) => {
+        try {
+            const p = await ai.generateImage(settings, req.body?.prompt
+                || 'a cozy desk with a warm lamp at night, seen from first person');
+            res.json({ ok: true, path: p });
+        } catch (e) {
+            res.status(500).json({ ok: false, error: e.message });
+        }
     });
 
     // 저장 표시 토글 (자동 정리에서 제외)
