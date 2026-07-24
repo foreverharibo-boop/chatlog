@@ -1,0 +1,7 @@
+{
+    "name": "chatlog",
+    "version": "1.0.0",
+    "description": "chatlog 확장용 SillyTavern 서버 플러그인 — 시간 슬롯 스케줄러 + 캐릭터 지연 댓글 생성",
+    "main": "index.js",
+    "private": true
+}

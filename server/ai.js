@@ -27,8 +27,11 @@ function resolveTextApi(settings) {
         name: profile.name,
         source,
         model: profile.model,
-        apiKey: secrets[`api_key_${source}`] || '',
+        apiKey: secrets[`api_key_${source}`] || secrets[`api_key_vertexai`] || '',
         customUrl: profile['custom-url'] || profile.reverse_proxy || '',
+        provider: source === 'vertexai' ? 'vertex' : 'aistudio',
+        projectId: profile.vertexai_project || settings.imageProjectId || '',
+        region: profile.vertexai_region || settings.imageRegion || 'global',
     };
 }
 
@@ -47,23 +50,49 @@ function readImageAsBase64(webPath) {
     }
 }
 
+// ── Google 엔드포인트 (AI Studio / Vertex Express 공용) ──
+/**
+ * 폴라로이드 프록시와 같은 방식. Vertex Express 모드는 서비스 계정 OAuth 없이
+ * API 키를 x-goog-api-key 헤더로 그대로 넘긴다.
+ */
+function googleUrl({ provider, model, projectId, region }) {
+    if (provider === 'vertex') {
+        if (!projectId) throw new Error('Vertex 모드에는 프로젝트 ID가 필요합니다');
+        const r = region || 'global';
+        const base = r === 'global'
+            ? 'https://aiplatform.googleapis.com/v1'
+            : `https://${r}-aiplatform.googleapis.com/v1`;
+        return `${base}/projects/${projectId}/locations/${r}/publishers/google/models/${model}:generateContent`;
+    }
+    return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+}
+
+async function callGoogle(cfg, body) {
+    const res = await fetch(googleUrl(cfg), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cfg.apiKey },
+        body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+        const detail = await res.text();
+        throw new Error(`${cfg.provider === 'vertex' ? 'vertex' : 'google'} ${res.status}: ${detail.slice(0, 300)}`);
+    }
+    return res.json();
+}
+
 // ── 프로바이더별 호출 ─────────────────────────────────────
 async function callGemini(api, { system, user, image }) {
     const parts = [{ text: user }];
     if (image) parts.push({ inline_data: { mime_type: image.mime, data: image.data } });
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${api.model}:generateContent?key=${api.apiKey}`;
-    const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+    const json = await callGoogle(
+        { provider: api.provider, model: api.model, apiKey: api.apiKey, projectId: api.projectId, region: api.region },
+        {
             system_instruction: { parts: [{ text: system }] },
             contents: [{ role: 'user', parts }],
             generationConfig: { temperature: 1.0, maxOutputTokens: 200 },
-        }),
-    });
-    if (!res.ok) throw new Error(`gemini ${res.status}: ${await res.text()}`);
-    const json = await res.json();
+        },
+    );
     return json?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '';
 }
 
@@ -220,15 +249,19 @@ async function generateCharacterCut(settings, room, member, slotAt) {
 async function generateImage(settings, scene) {
     const prompt = `${scene}. Casual amateur phone snapshot, natural available light, slightly imperfect framing, no text, no watermark.`;
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${settings.imageModel}:generateContent?key=${settings.imageApiKey}`;
-    const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }] }] }),
-    });
-    if (!res.ok) throw new Error(`image ${res.status}`);
+    if (!settings.imageApiKey) throw new Error('이미지 API 키가 비어 있습니다');
 
-    const json = await res.json();
+    const json = await callGoogle({
+        provider: settings.imageProvider === 'vertex' ? 'vertex' : 'aistudio',
+        model: settings.imageModel,
+        apiKey: settings.imageApiKey,
+        projectId: settings.imageProjectId,
+        region: settings.imageRegion,
+    }, {
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: { responseModalities: ['IMAGE'] },
+    });
+
     const part = json?.candidates?.[0]?.content?.parts?.find(p => p.inline_data || p.inlineData);
     const inline = part?.inline_data || part?.inlineData;
     if (!inline) throw new Error('이미지 데이터 없음');
@@ -242,4 +275,4 @@ async function generateImage(settings, scene) {
     return `/user/images/chatlog/${filename}`;
 }
 
-module.exports = { resolveTextApi, generateComment, generateCharacterCut, generateImage, timeLabel };
+module.exports = { resolveTextApi, googleUrl, callGoogle, generateComment, generateCharacterCut, generateImage, timeLabel };

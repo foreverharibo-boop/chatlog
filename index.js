@@ -59,8 +59,23 @@ const SETTINGS_HTML = `
 
       <small>서버가 이 프로필의 모델·키를 직접 읽어서 씁니다. 브라우저에서 돌릴 때도 이 프로필로 조용히 요청하며, 활성 프로필은 바뀌지 않습니다.</small>
 
+      <label for="chatlog-image-provider">이미지 API 방식</label>
+      <select id="chatlog-image-provider" class="text_pole">
+        <option value="vertex">Vertex AI (Express 모드)</option>
+        <option value="aistudio">Google AI Studio</option>
+      </select>
+
       <label for="chatlog-image-key">이미지 생성 API 키</label>
       <input id="chatlog-image-key" type="password" class="text_pole" placeholder="이미지 전용 키">
+
+      <div id="chatlog-vertex-fields">
+        <label for="chatlog-image-project">프로젝트 ID</label>
+        <input id="chatlog-image-project" type="text" class="text_pole" placeholder="my-project-123">
+
+        <label for="chatlog-image-region">리전</label>
+        <input id="chatlog-image-region" type="text" class="text_pole" placeholder="global">
+        <small>모르겠으면 global 그대로 두세요.</small>
+      </div>
 
       <label for="chatlog-image-model">이미지 모델 (나노바나나)</label>
       <select id="chatlog-image-model" class="text_pole">
@@ -152,7 +167,12 @@ const FALLBACK_SETTINGS = {
     profileName: '', imageApiKey: '', imageModel: 'gemini-3.1-flash-lite-image',
     commentDelayMinMin: 1, commentDelayMaxMin: 30,
     autoCleanup: false, cleanupAfterDays: 1, keepSaved: true,
+    imageProvider: 'vertex', imageProjectId: '', imageRegion: 'global',
 };
+
+function toggleVertexFields() {
+    $('#chatlog-vertex-fields').toggle($('#chatlog-image-provider').val() === 'vertex');
+}
 
 function setImageModel(value) {
     const $sel = $('#chatlog-image-model');
@@ -184,6 +204,10 @@ async function loadSettingsUi() {
 
     $('#chatlog-image-key').val(s.imageApiKey || '');
     setImageModel(s.imageModel);
+    $('#chatlog-image-provider').val(s.imageProvider || 'vertex');
+    $('#chatlog-image-project').val(s.imageProjectId || '');
+    $('#chatlog-image-region').val(s.imageRegion || 'global');
+    toggleVertexFields();
     $('#chatlog-delay-min').val(s.commentDelayMinMin);
     $('#chatlog-delay-max').val(s.commentDelayMaxMin);
     $('#chatlog-autoclean').prop('checked', !!s.autoCleanup);
@@ -219,6 +243,9 @@ async function saveSettingsUi() {
         profileName: $('#chatlog-profile').val(),
         imageApiKey: $('#chatlog-image-key').val(),
         imageModel: readImageModel(),
+        imageProvider: $('#chatlog-image-provider').val(),
+        imageProjectId: $('#chatlog-image-project').val().trim(),
+        imageRegion: $('#chatlog-image-region').val().trim() || 'global',
         commentDelayMinMin: Number($('#chatlog-delay-min').val()),
         commentDelayMaxMin: Number($('#chatlog-delay-max').val()),
         userPersonaName: ctx().name1 || '',
@@ -269,7 +296,9 @@ async function refresh() {
     try {
         state = await api('/state');
     } catch (e) {
-        $('.chatlog-body').html(`<div class="chatlog-empty">불러오기 실패<br><small>${esc(e.message)}</small></div>`);
+        $('.chatlog-body').html(
+            `<div class="chatlog-empty">서버 플러그인에 연결하지 못했어요<br>` +
+            `<small>plugins/chatlog 설치와 ST 재시작을 확인해주세요<br>${esc(e.message)}</small></div>`);
         return;
     }
     render();
@@ -873,13 +902,20 @@ jQuery(async () => {
         const n = refreshProfileSelect().length;
         toastr?.info?.(n ? `연결 프로필 ${n}개` : '연결 프로필을 못 찾았어요');
     });
+    $('#chatlog-image-provider').on('change', toggleVertexFields);
     $('#chatlog-image-model').on('change', function () {
         $('#chatlog-image-model-custom').toggle(this.value === '__custom');
     });
     $('#chatlog-test-image').on('click', async () => {
         const $r = $('#chatlog-test-result').text('생성 중...');
         try {
-            await api('/settings', { imageApiKey: $('#chatlog-image-key').val(), imageModel: readImageModel() });
+            await api('/settings', {
+                imageApiKey: $('#chatlog-image-key').val(),
+                imageModel: readImageModel(),
+                imageProvider: $('#chatlog-image-provider').val(),
+                imageProjectId: $('#chatlog-image-project').val().trim(),
+                imageRegion: $('#chatlog-image-region').val().trim() || 'global',
+            });
             const r = await api('/test/image', {});
             $r.html(`성공 — <a href="${r.path}" target="_blank">이미지 보기</a>`);
         } catch (e) {

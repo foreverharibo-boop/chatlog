@@ -22,7 +22,10 @@ let settings = {
     profileName: '',        // ST 연결 프로필 이름 (텍스트 생성용)
     userHandle: 'default-user',
     imageApiKey: '',        // 이미지 생성 키만 별도
+    imageProvider: 'vertex',                     // 'vertex' (Express) | 'aistudio'
     imageModel: 'gemini-3.1-flash-lite-image',   // 나노바나나 2 Lite
+    imageProjectId: '',                          // Vertex 프로젝트 ID
+    imageRegion: 'global',                       // Vertex 리전
     userPersonaName: '',    // 유저 페르소나 이름 (클라이언트가 동기화)
     commentDelayMinMin: 1,
     commentDelayMaxMin: 30,
