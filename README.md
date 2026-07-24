@@ -2,16 +2,20 @@
 
 ## 설치
 
-### 1. 서버 플러그인
+### 1. 클라이언트 확장 (깃허브 설치)
+ST → 확장 → Install extension → 이 저장소 URL 붙여넣기
+
+수동 설치라면 저장소 전체를:
+```
+SillyTavern/public/scripts/extensions/third-party/chatlog/
+```
+
+### 2. 서버 플러그인 (수동 필수)
+서버 플러그인은 확장 설치 기능으로 안 들어갑니다. 직접 복사하세요:
 ```
 server/  →  SillyTavern/plugins/chatlog/
 ```
 `config.yaml` 에서 `enableServerPlugins: true` 확인 후 ST 재시작.
-
-### 2. 클라이언트 확장
-```
-extension/  →  SillyTavern/public/scripts/extensions/third-party/chatlog/
-```
 
 ### 3. 설정
 확장 탭 → chatlog
