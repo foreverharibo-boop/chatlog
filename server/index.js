@@ -6,7 +6,14 @@
 const fs = require('fs');
 const path = require('path');
 
-const ai = require('./ai');
+// ai.js 는 핫 리로드 대상 — 캐시를 비우면 서버 재시작 없이 새 코드가 먹는다
+let _ai = require('./ai');
+function reloadAi() {
+    delete require.cache[require.resolve('./ai')];
+    _ai = require('./ai');
+    return true;
+}
+const ai = new Proxy({}, { get: (_, k) => _ai[k] });
 
 const DATA_PATH = path.join(__dirname, 'data.json');
 const SETTINGS_PATH = path.join(__dirname, 'settings.json');
@@ -296,6 +303,19 @@ async function init(router) {
         }
         saveDb();
         res.json({ ok: true });
+    });
+
+    // 핫 리로드 — ai.js 와 settings.json 을 다시 읽는다 (서버 재시작 불필요)
+    router.post('/reload', (req, res) => {
+        try {
+            reloadAi();
+            settings = { ...settings, ...loadJson(SETTINGS_PATH, {}) };
+            console.log('[chatlog] 리로드 완료');
+            res.json({ ok: true, reloaded: ['ai.js', 'settings.json'] });
+        } catch (e) {
+            console.error('[chatlog] 리로드 실패:', e.message);
+            res.status(500).json({ ok: false, error: e.message });
+        }
     });
 
     // 클라이언트가 대기 댓글 작업을 가져감 (가져가면 큐에서 제거)

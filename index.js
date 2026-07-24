@@ -138,6 +138,7 @@ const SETTINGS_HTML = `
       <div class="chatlog-row chatlog-actions">
         <div id="chatlog-save" class="menu_button">저장</div>
         <div id="chatlog-open" class="menu_button">챗로그 열기</div>
+        <div id="chatlog-reload" class="menu_button" title="서버의 ai.js 다시 읽기">↻</div>
       </div>
     </div>
   </div>
@@ -899,6 +900,16 @@ function registerSlashCommands() {
     }));
 
     P.addCommandObject(Cmd.fromProps({
+        name: 'chatlog-reload',
+        helpString: '서버의 ai.js / settings.json 다시 읽기 (ST 재시작 불필요)',
+        callback: async () => {
+            const r = await api('/reload', {});
+            toastr?.success?.('리로드 완료');
+            return JSON.stringify(r);
+        },
+    }));
+
+    P.addCommandObject(Cmd.fromProps({
         name: 'chatlog-jobs',
         helpString: '대기 중인 작업 목록',
         callback: async () => {
@@ -939,6 +950,10 @@ jQuery(async () => {
         } catch (e) {
             $r.text('실패: ' + e.message);
         }
+    });
+    $('#chatlog-reload').on('click', async () => {
+        try { await api('/reload', {}); toastr?.success?.('서버 코드 리로드 완료'); }
+        catch (e) { toastr?.error?.('리로드 실패: ' + e.message); }
     });
     $('#chatlog-cleannow').on('click', async () => {
         if (!confirm('지난 기록을 지금 정리할까요?')) return;
