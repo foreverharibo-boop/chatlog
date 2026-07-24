@@ -75,7 +75,8 @@ async function callGoogle(cfg, body) {
     });
     if (!res.ok) {
         const detail = await res.text();
-        throw new Error(`${cfg.provider === 'vertex' ? 'vertex' : 'google'} ${res.status}: ${detail.slice(0, 300)}`);
+        console.error('[chatlog] Google API 오류', cfg.provider, cfg.model, res.status, detail);
+        throw new Error(`${cfg.provider === 'vertex' ? 'vertex' : 'google'} ${res.status} (${cfg.model}): ${detail.slice(0, 600)}`);
     }
     return res.json();
 }
@@ -259,7 +260,6 @@ async function generateImage(settings, scene) {
         region: settings.imageRegion,
     }, {
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: { responseModalities: ['IMAGE'] },
     });
 
     const part = json?.candidates?.[0]?.content?.parts?.find(p => p.inline_data || p.inlineData);
