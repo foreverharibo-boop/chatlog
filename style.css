@@ -9,7 +9,8 @@ html > .chatlog-sheet {
     position: fixed !important;
     top: 0 !important; left: 0 !important; right: 0 !important; bottom: 0 !important;
     width: 100vw !important;
-    height: 100dvh !important;
+    height: 100vh !important;
+    height: 100svh !important;
     margin: 0 !important;
     padding: 0 !important;
     display: flex !important;
@@ -25,6 +26,16 @@ html > .chatlog-sheet {
 
 html > .chatlog-overlay { z-index: 100000 !important; }
 html > .chatlog-sheet { z-index: 100010 !important; }
+
+/* 챗로그·시트보다 토스트를 위에 표시 */
+html #toast-container,
+body #toast-container,
+#toast-container.toast-top-center,
+#toast-container.toast-top-right,
+#toast-container.toast-bottom-right {
+    position: fixed !important;
+    z-index: 100100 !important;
+}
 
 html > .chatlog-overlay *,
 html > .chatlog-sheet * {
@@ -52,6 +63,8 @@ html > .chatlog-sheet * {
     color: #191919;
     border-radius: 24px;
     border: 1px solid #ececec;
+    isolation: isolate;
+    contain: layout paint;
 
     font-family: -apple-system, "Pretendard", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
     letter-spacing: -0.02em;
@@ -450,6 +463,8 @@ html > .chatlog-sheet * {
     color: #191919;
     font-family: -apple-system, "Pretendard", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
     letter-spacing: -0.02em;
+    isolation: isolate;
+    contain: layout paint;
 }
 
 .chatlog-sheet-title {
@@ -521,6 +536,10 @@ html > .chatlog-sheet * {
     background: #f4f2ee !important;
     color: #191919 !important;
     border: none !important;
+}
+.chatlog-upload-sheet .chatlog-submit.busy {
+    pointer-events: none;
+    opacity: 0.55;
 }
 
 /* ── 하루로그 그리드 ───────────────────────────────────── */
@@ -982,20 +1001,16 @@ html > .chatlog-sheet * {
     animation: chatlog-slide-prev 180ms ease-out both;
 }
 .chatlog-stage.motion-jump .chatlog-cardwrap {
-    animation: chatlog-slide-fade 150ms ease-out both;
+    animation: none;
 }
 
 @keyframes chatlog-slide-next {
-    from { opacity: 0.5; transform: translateX(20px); }
-    to { opacity: 1; transform: translateX(0); }
+    from { transform: translateX(20px); }
+    to { transform: translateX(0); }
 }
 @keyframes chatlog-slide-prev {
-    from { opacity: 0.5; transform: translateX(-20px); }
-    to { opacity: 1; transform: translateX(0); }
-}
-@keyframes chatlog-slide-fade {
-    from { opacity: 0.45; }
-    to { opacity: 1; }
+    from { transform: translateX(-20px); }
+    to { transform: translateX(0); }
 }
 
 .chatlog-cardwrap { display: flex; flex-direction: column; }

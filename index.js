@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.7.15';
+const CHATLOG_VERSION = '0.7.16';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -250,7 +250,7 @@ const SETTINGS_HTML = `
     <div class="inline-drawer-toggle inline-drawer-header">
       <b>챗로그</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
     </div>
-    <div class="inline-drawer-content chatlog-settings-grid">
+    <div class="inline-drawer-content chatlog-settings-grid" style="display:none">
       <div class="chatlog-setting-section">생성 연결</div>
 
       <div class="chatlog-setting-field">
@@ -836,18 +836,32 @@ async function openChatlog() {
 
 function closeChatlog() { $overlay?.remove(); $overlay = null; }
 
+let refreshInFlight = null;
 async function refresh() {
-    try {
-        state = await api('/state');
-        await syncRoomCharacterCards();
-    } catch (e) {
-        $overlay?.find('.chatlog-body').html(
-            `<div class="chatlog-empty">서버 플러그인에 연결하지 못했어요<br>` +
-            `<small>plugins/chatlog 설치와 ST 재시작을 확인해주세요<br>${esc(e.message)}</small></div>`);
-        return;
-    }
-    updateQuickOpenBadge();
-    render();
+    if (refreshInFlight) return refreshInFlight;
+    refreshInFlight = (async () => {
+        const $body = $overlay?.find('.chatlog-body');
+        const scrollTop = $body?.scrollTop() || 0;
+        try {
+            state = await api('/state');
+            await syncRoomCharacterCards();
+        } catch (e) {
+            $body?.html(
+                `<div class="chatlog-empty">서버 플러그인에 연결하지 못했어요<br>` +
+                `<small>plugins/chatlog 설치와 ST 재시작을 확인해주세요<br>${esc(e.message)}</small></div>`);
+            return;
+        }
+        updateQuickOpenBadge();
+        render();
+        requestAnimationFrame(() => {
+            if ($overlay && view.screen === 'feed') {
+                $overlay.find('.chatlog-body').scrollTop(scrollTop);
+            }
+        });
+    })().finally(() => {
+        refreshInFlight = null;
+    });
+    return refreshInFlight;
 }
 
 function render() {
@@ -858,8 +872,9 @@ function render() {
 
 // ── 로그 목록 ─────────────────────────────────────────────
 function renderRooms() {
-    const $b = $('.chatlog-body').empty();
-    $('.chatlog-title').text('chatlog');
+    const $body = $overlay.find('.chatlog-body');
+    const $b = $('<div class="chatlog-render-buffer"></div>');
+    $overlay.find('.chatlog-title').text('chatlog');
 
     const rooms = Object.values(state.rooms);
     if (!rooms.length) {
@@ -892,6 +907,7 @@ function renderRooms() {
     const $new = $('<div class="chatlog-newroom"><span class="fa-solid fa-plus"></span> 새 로그 만들기</div>');
     $new.on('click', createRoomFlow);
     $b.append($new);
+    $body.empty().append($b.children());
 }
 
 // ── 피드: 슬롯 페이지 (실물 셋로그 구조) ──────────────────
@@ -980,8 +996,9 @@ function renderFeed() {
     const room = state.rooms[view.roomId];
     if (!room) { view.screen = 'rooms'; return render(); }
 
-    $('.chatlog-title').text(room.name);
-    const $b = $('.chatlog-body').empty();
+    $overlay.find('.chatlog-title').text(room.name);
+    const $body = $overlay.find('.chatlog-body');
+    const $b = $('<div class="chatlog-render-buffer"></div>');
 
     const { days, dayPosts, slots, pages, pageIndex, f } = feedState(room);
 
@@ -1025,6 +1042,7 @@ function renderFeed() {
 
     if (!slots.length) {
         $b.append('<div class="chatlog-empty">이 날은 기록이 없어요.<br><small>카메라 버튼으로 지금 한 장 올려보세요.</small></div>');
+        $body.empty().append($b.children());
         return;
     }
 
@@ -1045,7 +1063,10 @@ function renderFeed() {
     $b.append($dots);
 
     const currentPage = pages[pageIndex];
-    if (!currentPage) return;
+    if (!currentPage) {
+        $body.empty().append($b.children());
+        return;
+    }
 
     const postCount = currentPage.items.filter(item => item.kind === 'post').length;
     const emptyCount = currentPage.items.filter(item => item.kind === 'empty').length;
@@ -1084,6 +1105,7 @@ function renderFeed() {
     }
     f.motion = 'none';
     $b.append($stage);
+    $body.empty().append($b.children());
 }
 
 function hourLabelShort(h) {
@@ -1270,8 +1292,9 @@ function replySheet(room, post) {
 
 // ── 올리기 ────────────────────────────────────────────────
 function uploadSheet(room) {
+    if ($('.chatlog-upload-sheet').length) return;
     const $sheet = $(`
-      <div class="chatlog-sheet">
+      <div class="chatlog-sheet chatlog-upload-sheet">
         <div class="chatlog-sheet-inner">
           <div class="chatlog-sheet-title">지금 이 순간</div>
           <input class="chatlog-camera-input" type="file" accept="image/*" capture="environment" hidden>
@@ -1325,19 +1348,21 @@ function uploadSheet(room) {
     $sheet.on('click', e => { if (e.target === $sheet[0]) close(); });
     $sheet.find('.chatlog-cancel').on('click', close);
 
-    $sheet.find('.chatlog-submit').on('click', async () => {
+    $sheet.find('.chatlog-submit').on('click', async function () {
+        const $submit = $(this);
+        if ($submit.hasClass('busy')) return;
         const text = $sheet.find('.chatlog-input').val();
         if (!text && !imageData) return close();
-        $sheet.find('.chatlog-submit').text('올리는 중...');
+        $submit.addClass('busy').text('올리는 중...');
         try {
             let imagePath = null;
             if (imageData) imagePath = await uploadImage(imageData);
             await api('/post', { roomId: room.id, text, image: imagePath });
             close();
-            refresh();
+            await refresh();
         } catch (e) {
             toastr?.error?.('업로드 실패: ' + e.message);
-            $sheet.find('.chatlog-submit').text('올리기');
+            $submit.removeClass('busy').text('올리기');
         }
     });
 }
@@ -2157,6 +2182,9 @@ window.cl = {
 // ── 진입 ──────────────────────────────────────────────────
 jQuery(async () => {
     $('#extensions_settings2').append(SETTINGS_HTML);
+    const $settingsDrawer = $('.chatlog-settings .inline-drawer-content');
+    $settingsDrawer.hide();
+    $('.chatlog-settings .inline-drawer-icon').addClass('down');
     $('#chatlog-save').on('click', saveSettingsUi);
     $('#chatlog-open').on('click', openChatlog);
     $('#chatlog-profile-refresh').on('click', () => {
