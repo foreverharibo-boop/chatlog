@@ -470,13 +470,33 @@ html > .chatlog-sheet * {
     align-items: center;
     justify-content: center;
     gap: 8px;
-    cursor: pointer;
     color: #b9b3a9;
     overflow: hidden;
 }
-.chatlog-preview:hover { color: #191919; }
 .chatlog-preview img { width: 100%; height: 100%; object-fit: cover; }
 .chatlog-preview small { font-size: 0.8em; }
+
+.chatlog-photo-sources {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 10px;
+}
+.chatlog-photo-sources .chatlog-photo-source {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+    padding: 10px 8px;
+    border: 0 !important;
+    border-radius: 12px;
+    background: #f4f2ee !important;
+    color: #191919 !important;
+    white-space: nowrap;
+}
 
 .chatlog-input {
     width: 100%;
@@ -506,15 +526,35 @@ html > .chatlog-sheet * {
 /* ── 하루로그 그리드 ───────────────────────────────────── */
 .chatlog-grid {
     display: grid;
-    gap: 3px;
-    border-radius: 18px;
-    overflow: hidden;
-    background: #f0ede8;
+    gap: 12px;
 }
 .chatlog-grid.g1 { grid-template-columns: 1fr; }
 .chatlog-grid.g2 { grid-template-columns: 1fr 1fr; }
 .chatlog-grid.g3 { grid-template-columns: 1fr 1fr 1fr; }
 
+.chatlog-daylog-help {
+    margin: -7px 0 12px;
+    color: #a8a29a;
+    font-size: 0.76em;
+    line-height: 1.4;
+    text-align: center;
+}
+.chatlog-daylog-hour {
+    overflow: hidden;
+    border-radius: 18px;
+    background: #f0ede8;
+}
+.chatlog-daylog-hour-label {
+    padding: 7px 10px;
+    color: #6f6961;
+    font-size: 0.72em;
+    font-weight: 800;
+}
+.chatlog-daylog-photos {
+    display: grid;
+    grid-template-columns: repeat(var(--chatlog-daylog-columns, 1), minmax(0, 1fr));
+    gap: 3px;
+}
 .chatlog-cell {
     position: relative;
     aspect-ratio: 9 / 16;
@@ -591,16 +631,121 @@ html > .chatlog-sheet * {
 }
 
 /* ── 확장 탭 설정 (ST 테마 따라감) ─────────────────────── */
-.chatlog-settings .chatlog-row { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
-.chatlog-settings .chatlog-row .text_pole { flex: 1 1 auto; min-width: 0; }
-.chatlog-settings .chatlog-actions { margin-top: 12px; }
-.chatlog-settings small { display: block; opacity: 0.6; margin: 2px 0 8px; line-height: 1.35; }
-.chatlog-settings label { display: block; margin-top: 10px; font-weight: 600; }
-.chatlog-settings #chatlog-profile-refresh { flex: 0 0 auto; padding: 6px 10px; }
+.chatlog-settings .chatlog-settings-grid {
+    display: grid;
+    gap: 0;
+    padding-bottom: 8px;
+}
+.chatlog-setting-section {
+    margin: 14px 0 5px;
+    padding-top: 12px;
+    border-top: 1px solid color-mix(in srgb, var(--SmartThemeBodyColor) 13%, transparent);
+    font-size: 0.92em;
+    font-weight: 750;
+}
+.chatlog-setting-section:first-child {
+    margin-top: 4px;
+    padding-top: 0;
+    border-top: 0;
+}
+.chatlog-setting-field {
+    display: grid;
+    grid-template-columns: minmax(120px, 36%) minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+    min-height: 42px;
+    padding: 4px 0;
+}
+.chatlog-setting-field > label,
+.chatlog-setting-label {
+    min-width: 0;
+    margin: 0 !important;
+    font-size: 0.9em;
+    font-weight: 650;
+    line-height: 1.25;
+}
+.chatlog-setting-control {
+    min-width: 0;
+    margin: 0 !important;
+}
+.chatlog-setting-control.checkbox_label {
+    display: flex !important;
+    align-items: center;
+    gap: 7px;
+    min-height: 34px;
+}
+.chatlog-setting-control.checkbox_label input {
+    flex: 0 0 auto;
+    margin: 0;
+}
+.chatlog-control-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+}
+.chatlog-control-row .text_pole,
+.chatlog-setting-control > .text_pole {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+}
+.chatlog-short-input {
+    flex: 0 0 78px !important;
+    width: 78px !important;
+    text-align: center;
+}
+.chatlog-number-pair .chatlog-short-input {
+    flex-basis: 70px !important;
+    width: 70px !important;
+}
+.chatlog-mini-button {
+    width: auto !important;
+    min-width: max-content;
+    padding: 6px 10px !important;
+    white-space: nowrap;
+}
+.chatlog-icon-button {
+    flex: 0 0 38px;
+    width: 38px !important;
+    min-width: 38px;
+    padding: 6px !important;
+}
+.chatlog-setting-help {
+    display: block;
+    margin: 0 0 4px calc(36% + 10px) !important;
+    opacity: 0.6;
+    font-size: 0.78em;
+    line-height: 1.35;
+}
+.chatlog-setting-tools {
+    display: flex;
+    justify-content: flex-end;
+    padding: 4px 0;
+}
+.chatlog-settings .chatlog-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr 42px;
+    gap: 8px;
+    margin-top: 16px;
+}
+.chatlog-settings .chatlog-actions .menu_button {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+    white-space: nowrap;
+}
+.chatlog-settings #chatlog-profile-refresh {
+    flex: 0 0 38px;
+}
+.chatlog-custom-model-field {
+    display: none;
+}
 .chatlog-runtime-status {
     display: grid;
     gap: 5px;
-    margin-top: 5px;
+    width: 100%;
+    margin-top: 2px;
     padding: 10px 12px;
     border-radius: 12px;
     background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 76%, transparent);
@@ -615,6 +760,77 @@ html > .chatlog-sheet * {
 .chatlog-runtime-status b { opacity: 0.68; }
 .chatlog-runtime-status span { min-width: 0; overflow-wrap: anywhere; }
 .chatlog-runtime-status .error { color: #e57373; }
+
+/* 입력창 옆 빠른 열기 */
+#chatlog-quick-open.chatlog-quick-open {
+    position: relative;
+    display: flex;
+    flex: 0 0 40px;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    margin: 0 2px;
+    padding: 0;
+    appearance: none;
+    border: 0;
+    border-radius: 12px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+    line-height: 1;
+    -webkit-tap-highlight-color: transparent;
+}
+#chatlog-quick-open.chatlog-quick-open:hover {
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 10%, transparent);
+}
+#chatlog-quick-open.busy {
+    opacity: 0.45;
+    pointer-events: none;
+}
+.chatlog-quick-face {
+    font-size: 22px;
+    transform: translateY(-1px);
+}
+.chatlog-quick-badge {
+    position: absolute;
+    top: -3px;
+    right: -3px;
+    min-width: 17px;
+    height: 17px;
+    padding: 0 4px;
+    border: 2px solid var(--SmartThemeBlurTintColor, #fff);
+    border-radius: 999px;
+    background: #ff4a3d;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 800;
+    line-height: 13px;
+    text-align: center;
+    box-sizing: border-box;
+}
+
+@media (max-width: 440px) {
+    .chatlog-setting-field {
+        grid-template-columns: 108px minmax(0, 1fr);
+        gap: 8px;
+    }
+    .chatlog-setting-help {
+        margin-left: 116px !important;
+    }
+    .chatlog-short-input {
+        flex-basis: 64px !important;
+        width: 64px !important;
+    }
+    .chatlog-number-pair .chatlog-short-input {
+        flex-basis: 58px !important;
+        width: 58px !important;
+    }
+    .chatlog-runtime-status > div {
+        grid-template-columns: 76px minmax(0, 1fr);
+    }
+}
 
 /* ══════════════════════════════════════════
    v0.6.0 — 실물 셋로그 슬롯 페이지
@@ -810,7 +1026,7 @@ html > .chatlog-sheet * {
 .chatlog-sc-time.dim { color: #cfcac2; }
 .chatlog-empty-label {
     color: #b8b1a8;
-    font-size: 0.72em;
+    font-size: 0.9em;
     font-weight: 700;
 }
 

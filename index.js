@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.7.2';
+const CHATLOG_VERSION = '0.7.5';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -225,129 +225,181 @@ const SETTINGS_HTML = `
     <div class="inline-drawer-toggle inline-drawer-header">
       <b>챗로그</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
     </div>
-    <div class="inline-drawer-content">
-      <label for="chatlog-textmode">텍스트 생성 방식</label>
-      <select id="chatlog-textmode" class="text_pole">
-        <option value="express">이미지와 같은 Express 키 사용 (권장)</option>
-        <option value="profile">ST 연결 프로필 사용</option>
-      </select>
+    <div class="inline-drawer-content chatlog-settings-grid">
+      <div class="chatlog-setting-section">생성 연결</div>
 
-      <div id="chatlog-textmodel-row">
+      <div class="chatlog-setting-field">
+        <label for="chatlog-textmode">텍스트 생성</label>
+        <div class="chatlog-setting-control">
+          <select id="chatlog-textmode" class="text_pole">
+            <option value="express">이미지와 같은 Express 키 사용 (권장)</option>
+            <option value="profile">ST 연결 프로필 사용</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="chatlog-textmodel-row" class="chatlog-setting-field">
         <label for="chatlog-text-model">텍스트 모델</label>
-        <input id="chatlog-text-model" type="text" class="text_pole" placeholder="gemini-2.5-flash">
+        <div class="chatlog-setting-control">
+          <input id="chatlog-text-model" type="text" class="text_pole" placeholder="gemini-2.5-flash">
+        </div>
       </div>
 
-      <label for="chatlog-profile">연결 프로필 (텍스트)</label>
-      <div class="chatlog-row">
-        <select id="chatlog-profile" class="text_pole"></select>
-        <div id="chatlog-profile-refresh" class="menu_button fa-solid fa-rotate" title="목록 새로고침"></div>
+      <div id="chatlog-profile-field" class="chatlog-setting-field">
+        <label for="chatlog-profile">연결 프로필</label>
+        <div class="chatlog-setting-control chatlog-control-row">
+          <select id="chatlog-profile" class="text_pole"></select>
+          <button id="chatlog-profile-refresh" type="button" class="menu_button chatlog-icon-button fa-solid fa-rotate" title="목록 새로고침"></button>
+        </div>
       </div>
-      <label class="checkbox_label chatlog-profile-follow">
-        <input id="chatlog-follow-profile" type="checkbox">
-        <span>실리태번에서 현재 선택한 연결 프로필 자동 사용</span>
-      </label>
-      <small id="chatlog-profile-count"></small>
-
-      <small>서버가 이 프로필의 모델·키를 직접 읽어서 씁니다. 브라우저에서 돌릴 때도 이 프로필로 조용히 요청하며, 활성 프로필은 바뀌지 않습니다.</small>
-
-      <label for="chatlog-image-provider">이미지 API 방식</label>
-      <select id="chatlog-image-provider" class="text_pole">
-        <option value="vertex">Vertex AI (Express 모드)</option>
-        <option value="aistudio">Google AI Studio</option>
-      </select>
-      <small>Vertex Express 모드는 프로젝트 ID·리전 없이 Express API 키만 사용합니다.</small>
-
-      <label for="chatlog-image-key">이미지 생성 API 키</label>
-      <input id="chatlog-image-key" type="password" class="text_pole" placeholder="이미지 전용 키">
-
-      <div id="chatlog-vertex-fields">
-        <label for="chatlog-image-project">프로젝트 ID</label>
-        <input id="chatlog-image-project" type="text" class="text_pole" placeholder="my-project-123">
-
-        <label for="chatlog-image-region">리전</label>
-        <input id="chatlog-image-region" type="text" class="text_pole" placeholder="global">
-        <small>모르겠으면 global 그대로 두세요.</small>
+      <div id="chatlog-profile-follow-field" class="chatlog-setting-field">
+        <span class="chatlog-setting-label">자동 연결</span>
+        <label class="checkbox_label chatlog-profile-follow chatlog-setting-control">
+          <input id="chatlog-follow-profile" type="checkbox">
+          <span>현재 선택 프로필 사용</span>
+        </label>
       </div>
+      <small id="chatlog-profile-count" class="chatlog-setting-help"></small>
 
-      <label for="chatlog-image-model">이미지 모델 (나노바나나)</label>
-      <select id="chatlog-image-model" class="text_pole">
-        <option value="gemini-3.1-flash-lite-image">나노바나나 2 Lite — 제일 싸고 빠름 (권장)</option>
-        <option value="gemini-3.1-flash-image">나노바나나 2 — 화질/속도 균형</option>
-        <option value="gemini-3-pro-image">나노바나나 Pro — 최고 화질, 비쌈</option>
-        <option value="gemini-2.5-flash-image">나노바나나 (구버전)</option>
-        <option value="__custom">직접 입력...</option>
-      </select>
-      <input id="chatlog-image-model-custom" type="text" class="text_pole" style="display:none" placeholder="모델 ID">
-      <div class="chatlog-row">
-        <div id="chatlog-test-image" class="menu_button">이미지 생성 테스트</div>
+      <div class="chatlog-setting-field">
+        <label for="chatlog-image-provider">이미지 API</label>
+        <div class="chatlog-setting-control">
+          <select id="chatlog-image-provider" class="text_pole">
+            <option value="vertex">Vertex AI (Express 모드)</option>
+            <option value="aistudio">Google AI Studio</option>
+          </select>
+        </div>
       </div>
-      <small id="chatlog-test-result"></small>
+      <small class="chatlog-setting-help">Vertex Express는 프로젝트 ID·리전 없이 API 키만 사용합니다.</small>
 
-      <hr>
-      <label>활동 시간대</label>
-      <div class="chatlog-row">
-        <input id="chatlog-active-from" type="number" min="0" max="23" class="text_pole">
-        <span>시 ~</span>
-        <input id="chatlog-active-to" type="number" min="1" max="24" class="text_pole">
-        <span>시</span>
-      </div>
-      <small>이 시간 밖에서는 캐릭터가 아무것도 올리지 않습니다.</small>
-
-      <label for="chatlog-interval">게시 판단 주기 (시간)</label>
-      <input id="chatlog-interval" type="number" min="1" max="24" class="text_pole">
-      <small>이 주기마다 캐릭터가 성격과 상황에 따라 올릴지 건너뛸지 결정합니다.</small>
-
-      <label for="chatlog-max-silence">최대 게시 공백 (활동 시간)</label>
-      <input id="chatlog-max-silence" type="number" min="1" max="72" class="text_pole">
-      <small>이 시간만큼 오래 안 올린 캐릭터는 다음 슬롯에 반드시 올립니다.</small>
-
-      <small id="chatlog-cost">비용 안내</small>
-
-      <label class="checkbox_label">
-        <input id="chatlog-jitter" type="checkbox"><span>판정 시각 흔들기 (±25%)</span>
-      </label>
-
-      <hr>
-      <label>댓글 지연 (분)</label>
-      <div class="chatlog-row">
-        <input id="chatlog-delay-min" type="number" min="0" max="600" class="text_pole">
-        <span>~</span>
-        <input id="chatlog-delay-max" type="number" min="1" max="600" class="text_pole">
+      <div class="chatlog-setting-field">
+        <label for="chatlog-image-key">이미지 API 키</label>
+        <div class="chatlog-setting-control">
+          <input id="chatlog-image-key" type="password" class="text_pole" placeholder="저장된 키를 바꿀 때만 입력">
+        </div>
       </div>
 
-      <label for="chatlog-char-comment-chance">캐릭터끼리 댓글 달 확률 (%)</label>
-      <input id="chatlog-char-comment-chance" type="number" min="0" max="100" class="text_pole">
-      <small>캐릭터 게시물에는 항상 이모지 반응을 남기고, 이 확률로 댓글도 답니다.</small>
+      <div id="chatlog-vertex-fields" hidden>
+        <input id="chatlog-image-project" type="hidden">
+        <input id="chatlog-image-region" type="hidden">
+      </div>
 
-      <hr>
-      <label>자동 실행 상태</label>
+      <div class="chatlog-setting-field">
+        <label for="chatlog-image-model">이미지 모델</label>
+        <div class="chatlog-setting-control chatlog-control-row">
+          <select id="chatlog-image-model" class="text_pole">
+            <option value="gemini-3.1-flash-lite-image">나노바나나 2 Lite — 빠름 (권장)</option>
+            <option value="gemini-3.1-flash-image">나노바나나 2 — 균형</option>
+            <option value="gemini-3-pro-image">나노바나나 Pro — 고화질</option>
+            <option value="gemini-2.5-flash-image">나노바나나 (구버전)</option>
+            <option value="__custom">직접 입력...</option>
+          </select>
+          <button id="chatlog-test-image" type="button" class="menu_button chatlog-mini-button">테스트</button>
+        </div>
+      </div>
+      <div class="chatlog-setting-field chatlog-custom-model-field">
+        <span class="chatlog-setting-label">직접 입력</span>
+        <div class="chatlog-setting-control">
+          <input id="chatlog-image-model-custom" type="text" class="text_pole" style="display:none" placeholder="모델 ID">
+        </div>
+      </div>
+      <small id="chatlog-test-result" class="chatlog-setting-help"></small>
+
+      <div class="chatlog-setting-section">게시 일정</div>
+
+      <div class="chatlog-setting-field">
+        <label>활동 시간</label>
+        <div class="chatlog-setting-control chatlog-control-row chatlog-number-pair">
+          <input id="chatlog-active-from" type="number" min="0" max="23" class="text_pole chatlog-short-input">
+          <span>시</span><span>~</span>
+          <input id="chatlog-active-to" type="number" min="1" max="24" class="text_pole chatlog-short-input">
+          <span>시</span>
+        </div>
+      </div>
+      <small class="chatlog-setting-help">이 시간 밖에서는 캐릭터가 올리지 않습니다.</small>
+
+      <div class="chatlog-setting-field">
+        <label for="chatlog-interval">판단 주기</label>
+        <div class="chatlog-setting-control chatlog-control-row">
+          <input id="chatlog-interval" type="number" min="1" max="24" class="text_pole chatlog-short-input">
+          <span>시간마다</span>
+        </div>
+      </div>
+      <small class="chatlog-setting-help">성격과 상황에 따라 게시하거나 건너뜁니다.</small>
+
+      <div class="chatlog-setting-field">
+        <label for="chatlog-max-silence">최대 게시 공백</label>
+        <div class="chatlog-setting-control chatlog-control-row">
+          <input id="chatlog-max-silence" type="number" min="1" max="72" class="text_pole chatlog-short-input">
+          <span>활동 시간</span>
+        </div>
+      </div>
+      <small id="chatlog-cost" class="chatlog-setting-help">비용 안내</small>
+
+      <div class="chatlog-setting-field">
+        <span class="chatlog-setting-label">시각 흔들기</span>
+        <label class="checkbox_label chatlog-setting-control">
+          <input id="chatlog-jitter" type="checkbox"><span>±25% 적용</span>
+        </label>
+      </div>
+
+      <div class="chatlog-setting-section">댓글과 반응</div>
+
+      <div class="chatlog-setting-field">
+        <label>댓글 지연</label>
+        <div class="chatlog-setting-control chatlog-control-row chatlog-number-pair">
+          <input id="chatlog-delay-min" type="number" min="0" max="600" class="text_pole chatlog-short-input">
+          <span>~</span>
+          <input id="chatlog-delay-max" type="number" min="1" max="600" class="text_pole chatlog-short-input">
+          <span>분</span>
+        </div>
+      </div>
+
+      <div class="chatlog-setting-field">
+        <label for="chatlog-char-comment-chance">캐릭터끼리 댓글</label>
+        <div class="chatlog-setting-control chatlog-control-row">
+          <input id="chatlog-char-comment-chance" type="number" min="0" max="100" class="text_pole chatlog-short-input">
+          <span>% 확률</span>
+        </div>
+      </div>
+      <small class="chatlog-setting-help">이모지는 항상 남기고, 설정한 확률로 댓글도 답니다.</small>
+
+      <div class="chatlog-setting-section">자동 실행 상태</div>
       <div id="chatlog-runtime-status" class="chatlog-runtime-status">불러오는 중...</div>
-      <div class="chatlog-row">
-        <div id="chatlog-status-refresh" class="menu_button">상태 새로고침</div>
+      <div class="chatlog-setting-tools">
+        <button id="chatlog-status-refresh" type="button" class="menu_button chatlog-mini-button">상태 새로고침</button>
       </div>
 
-      <hr>
-      <label class="checkbox_label">
-        <input id="chatlog-autoclean" type="checkbox">
-        <span>지난 기록 자동 삭제</span>
-      </label>
-      <div class="chatlog-row">
-        <input id="chatlog-cleandays" type="number" min="0" max="30" class="text_pole">
-        <span>일 지나면 삭제</span>
+      <div class="chatlog-setting-section">저장과 정리</div>
+
+      <div class="chatlog-setting-field">
+        <span class="chatlog-setting-label">자동 삭제</span>
+        <label class="checkbox_label chatlog-setting-control">
+          <input id="chatlog-autoclean" type="checkbox"><span>지난 기록 자동 삭제</span>
+        </label>
       </div>
-      <label class="checkbox_label">
-        <input id="chatlog-keepsaved" type="checkbox">
-        <span>저장 표시한 건 남기기</span>
-      </label>
-      <small>사진 파일과 하루로그 영상까지 같이 지웁니다. 0일이면 오늘 것만 남아요.</small>
-      <div class="chatlog-row">
-        <div id="chatlog-cleannow" class="menu_button">지금 정리</div>
+      <div class="chatlog-setting-field">
+        <label for="chatlog-cleandays">보관 기간</label>
+        <div class="chatlog-setting-control chatlog-control-row">
+          <input id="chatlog-cleandays" type="number" min="0" max="30" class="text_pole chatlog-short-input">
+          <span>일</span>
+        </div>
+      </div>
+      <div class="chatlog-setting-field">
+        <span class="chatlog-setting-label">보관 예외</span>
+        <label class="checkbox_label chatlog-setting-control">
+          <input id="chatlog-keepsaved" type="checkbox"><span>저장 표시한 기록 유지</span>
+        </label>
+      </div>
+      <small class="chatlog-setting-help">사진과 하루로그 영상도 함께 정리합니다. 0일이면 오늘 기록만 남습니다.</small>
+      <div class="chatlog-setting-tools">
+        <button id="chatlog-cleannow" type="button" class="menu_button chatlog-mini-button">지금 정리</button>
       </div>
 
-      <div class="chatlog-row chatlog-actions">
-        <div id="chatlog-save" class="menu_button">저장</div>
-        <div id="chatlog-open" class="menu_button">챗로그 열기</div>
-        <div id="chatlog-reload" class="menu_button" title="서버의 ai.js 다시 읽기">↻</div>
+      <div class="chatlog-actions">
+        <button id="chatlog-save" type="button" class="menu_button">저장</button>
+        <button id="chatlog-open" type="button" class="menu_button">챗로그 열기</button>
+        <button id="chatlog-reload" type="button" class="menu_button chatlog-icon-button" title="서버의 ai.js 다시 읽기">↻</button>
       </div>
     </div>
   </div>
@@ -407,9 +459,9 @@ const FALLBACK_SETTINGS = {
 function toggleTextMode() {
     const express = $('#chatlog-textmode').val() === 'express';
     $('#chatlog-textmodel-row').toggle(express);
-    $('#chatlog-profile').closest('.chatlog-row').toggle(!express);
+    $('#chatlog-profile-field').toggle(!express);
+    $('#chatlog-profile-follow-field').toggle(!express);
     $('#chatlog-profile-count').toggle(!express);
-    $('.chatlog-profile-follow').toggle(!express);
 }
 
 async function syncActiveConnectionProfile(profileName = null) {
@@ -435,13 +487,15 @@ function toggleVertexFields() {
 function setImageModel(value) {
     const $sel = $('#chatlog-image-model');
     const known = $sel.find('option').map((_, o) => o.value).get();
-    if (value && !known.includes(value)) {
+    const custom = !!value && !known.includes(value);
+    if (custom) {
         $sel.val('__custom');
-        $('#chatlog-image-model-custom').val(value).show();
+        $('#chatlog-image-model-custom').val(value);
     } else {
         $sel.val(value || 'gemini-3.1-flash-lite-image');
-        $('#chatlog-image-model-custom').hide();
     }
+    $('.chatlog-custom-model-field').toggle(custom);
+    $('#chatlog-image-model-custom').toggle(custom);
 }
 
 function readImageModel() {
@@ -455,6 +509,13 @@ function statusTime(timestamp) {
         : '아직 없음';
 }
 
+function compactRuntimeError(message) {
+    const normalized = String(message || '').replace(/\s+/g, ' ').trim();
+    const jsonStart = normalized.indexOf(': {');
+    const summary = jsonStart >= 0 ? normalized.slice(0, jsonStart) : normalized;
+    return summary.length > 180 ? `${summary.slice(0, 177)}…` : summary;
+}
+
 async function loadRuntimeStatus() {
     const $status = $('#chatlog-runtime-status');
     if (!$status.length) return;
@@ -463,7 +524,7 @@ async function loadRuntimeStatus() {
         $status.html([
             `<div><b>다음 판단</b><span>${esc(statusTime(status.nextSlotAt))}</span></div>`,
             `<div><b>마지막 성공</b><span>${esc(statusTime(status.lastSuccessAt))}${status.lastSuccess ? ` · ${esc(status.lastSuccess)}` : ''}</span></div>`,
-            `<div><b>마지막 오류</b><span class="${status.lastError ? 'error' : ''}">${status.lastError ? `${esc(statusTime(status.lastErrorAt))} · ${esc(status.lastError)}` : '없음'}</span></div>`,
+            `<div><b>마지막 오류</b><span class="${status.lastError ? 'error' : ''}" title="${esc(status.lastError || '')}">${status.lastError ? `${esc(statusTime(status.lastErrorAt))} · ${esc(compactRuntimeError(status.lastError))}` : '없음'}</span></div>`,
             status.lastNotice
                 ? `<div><b>최근 안내</b><span>${esc(status.lastNotice)}</span></div>`
                 : '',
@@ -582,9 +643,65 @@ async function saveSettingsUi() {
 
 // ═══════════ 오버레이 ═══════════
 let $overlay = null;
+let openingChatlog = null;
 
-function openChatlog() {
-    closeChatlog();
+function unreadCount(snapshot = state) {
+    return Object.values(snapshot?.posts || {}).reduce((total, posts) =>
+        total + (posts || []).reduce((count, post) =>
+            count
+            + (post.read ? 0 : 1)
+            + (post.comments || []).filter(comment => !comment.read).length, 0), 0);
+}
+
+function updateQuickOpenBadge() {
+    const count = unreadCount();
+    const $badge = $('#chatlog-quick-badge');
+    if (!$badge.length) return;
+    $badge.text(count > 99 ? '99+' : String(count)).toggle(count > 0);
+    $('#chatlog-quick-open').attr('aria-label',
+        count ? `챗로그 열기, 새 기록 ${count}개` : '챗로그 열기');
+}
+
+function ensureQuickOpenButton() {
+    if ($('#chatlog-quick-open').length) {
+        updateQuickOpenBadge();
+        return;
+    }
+    const $button = $(`
+      <button id="chatlog-quick-open" type="button" class="chatlog-quick-open interactable"
+        title="챗로그 열기" aria-label="챗로그 열기">
+        <span class="chatlog-quick-face" aria-hidden="true">🙃</span>
+        <span id="chatlog-quick-badge" class="chatlog-quick-badge" style="display:none"></span>
+      </button>`);
+    $button.on('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        openChatlog();
+    });
+
+    const $sendButton = $('#send_but');
+    if ($sendButton.length) $button.insertBefore($sendButton);
+    else {
+        const $host = $('#rightSendForm, #send_form').first();
+        if ($host.length) $button.appendTo($host);
+        else return;
+    }
+    updateQuickOpenBadge();
+}
+
+async function refreshQuickBadge() {
+    if (document.hidden || $overlay) {
+        updateQuickOpenBadge();
+        return;
+    }
+    try {
+        state = await api('/state');
+        updateQuickOpenBadge();
+    } catch { /* 서버가 재시작 중이면 다음 주기에 다시 확인 */ }
+}
+
+function mountChatlog(loadError = null) {
+    if ($overlay) return;
     $overlay = $(`
       <div class="chatlog-overlay">
         <div class="chatlog-app">
@@ -605,7 +722,35 @@ function openChatlog() {
     $overlay.find('.chatlog-back').on('click', () => { view.screen = 'rooms'; render(); });
 
     view = { screen: 'rooms', roomId: null };
-    refresh();
+    if (loadError) {
+        $overlay.find('.chatlog-body').html(
+            `<div class="chatlog-empty">서버 플러그인에 연결하지 못했어요<br>` +
+            `<small>plugins/chatlog 설치와 ST 재시작을 확인해주세요<br>${esc(loadError.message)}</small></div>`);
+    } else {
+        render();
+    }
+}
+
+async function openChatlog() {
+    if ($overlay) return;
+    if (openingChatlog) return openingChatlog;
+
+    $('#chatlog-quick-open').addClass('busy');
+    openingChatlog = (async () => {
+        let loadError = null;
+        try {
+            state = await api('/state');
+            await syncRoomCharacterCards();
+        } catch (error) {
+            loadError = error;
+        }
+        mountChatlog(loadError);
+        updateQuickOpenBadge();
+    })().finally(() => {
+        openingChatlog = null;
+        $('#chatlog-quick-open').removeClass('busy');
+    });
+    return openingChatlog;
 }
 
 function closeChatlog() { $overlay?.remove(); $overlay = null; }
@@ -615,11 +760,12 @@ async function refresh() {
         state = await api('/state');
         await syncRoomCharacterCards();
     } catch (e) {
-        $('.chatlog-body').html(
+        $overlay?.find('.chatlog-body').html(
             `<div class="chatlog-empty">서버 플러그인에 연결하지 못했어요<br>` +
             `<small>plugins/chatlog 설치와 ST 재시작을 확인해주세요<br>${esc(e.message)}</small></div>`);
         return;
     }
+    updateQuickOpenBadge();
     render();
 }
 
@@ -642,7 +788,8 @@ function renderRooms() {
     for (const room of rooms) {
         const posts = state.posts[room.id] || [];
         const last = posts[posts.length - 1];
-        const unread = posts.reduce((n, p) => n + (p.read ? 0 : 1) + p.comments.filter(c => !c.read).length, 0);
+        const unread = posts.reduce((n, p) =>
+            n + (p.read ? 0 : 1) + (p.comments || []).filter(c => !c.read).length, 0);
 
         const $card = $(`
           <div class="chatlog-roomcard">
@@ -653,7 +800,11 @@ function renderRooms() {
             </div>
             ${unread ? `<span class="chatlog-badge">${unread}</span>` : ''}
           </div>`);
-        $card.on('click', () => { view = { screen: 'feed', roomId: room.id }; render(); markRead(room.id); });
+        $card.on('click', () => {
+            markRead(room.id);
+            view = { screen: 'feed', roomId: room.id };
+            render();
+        });
         $b.append($card);
     }
 
@@ -782,7 +933,7 @@ function renderFeed() {
     });
     $top.find('.persona').on('click', () => changeRoomDisplayPersona(room));
     $top.find('.upload').on('click', () => uploadSheet(room));
-    $top.find('.daylog').on('click', () => dayLogView(room));
+    $top.find('.daylog').on('click', () => dayLogView(room, f.day));
     $b.append($top);
 
     if (!slots.length) {
@@ -831,7 +982,7 @@ function renderFeed() {
         try {
             const $card = item.kind === 'post'
                 ? slotCard(room, item.post)
-                : placeholderCard(item.person.name, item.person.avatar, item.timestamp);
+                : placeholderCard(item.person.name, item.person.avatar);
             addSlideNavigation($card, {
                 canPrev: pageIndex > 0,
                 canNext: pageIndex < pages.length - 1,
@@ -852,13 +1003,12 @@ function hourLabelShort(h) {
     return h < 12 ? `오전${h || 12}` : h === 12 ? '오후12' : `오후${h - 12}`;
 }
 
-function placeholderCard(name, avatar, ts) {
+function placeholderCard(name, avatar) {
     return $(`
       <div class="chatlog-cardwrap">
         <article class="chatlog-scard empty">
           <div class="chatlog-sc-top"><img src="${avatar}"><span>${esc(name)}</span></div>
           <div class="chatlog-sc-center">
-            <div class="chatlog-sc-time dim">${hhmm(ts)}</div>
             <div class="chatlog-empty-label">아직 기록 전</div>
           </div>
         </article>
@@ -1037,10 +1187,19 @@ function uploadSheet(room) {
       <div class="chatlog-sheet">
         <div class="chatlog-sheet-inner">
           <div class="chatlog-sheet-title">지금 이 순간</div>
-          <label class="chatlog-filepick">
-            <input type="file" accept="image/*" capture="environment" hidden>
-            <div class="chatlog-preview"><span class="fa-solid fa-camera"></span><small>사진 고르기</small></div>
-          </label>
+          <input class="chatlog-camera-input" type="file" accept="image/*" capture="environment" hidden>
+          <input class="chatlog-gallery-input" type="file" accept="image/*" hidden>
+          <div class="chatlog-preview">
+            <span class="fa-regular fa-image"></span><small>사진을 선택해주세요</small>
+          </div>
+          <div class="chatlog-photo-sources">
+            <button type="button" class="menu_button chatlog-photo-source camera">
+              <span class="fa-solid fa-camera"></span><span>카메라로 찍기</span>
+            </button>
+            <button type="button" class="menu_button chatlog-photo-source gallery">
+              <span class="fa-regular fa-images"></span><span>갤러리에서 선택</span>
+            </button>
+          </div>
           <textarea class="chatlog-input" rows="2" maxlength="60" placeholder="한 줄만"></textarea>
           <div class="chatlog-sheet-actions">
             <div class="menu_button chatlog-cancel">취소</div>
@@ -1052,15 +1211,27 @@ function uploadSheet(room) {
     document.documentElement.appendChild($sheet[0]);
 
     let imageData = null;
-    $sheet.find('input[type=file]').on('change', function () {
+    const readSelectedImage = function () {
         const f = this.files?.[0];
         if (!f) return;
+        if (!f.type.startsWith('image/')) {
+            showError('이미지 파일만 선택할 수 있어요.');
+            this.value = '';
+            return;
+        }
         const reader = new FileReader();
         reader.onload = () => {
             imageData = reader.result;
             $sheet.find('.chatlog-preview').html(`<img src="${imageData}">`);
         };
         reader.readAsDataURL(f);
+    };
+    $sheet.find('.chatlog-camera-input, .chatlog-gallery-input').on('change', readSelectedImage);
+    $sheet.find('.chatlog-photo-source.camera').on('click', () => {
+        $sheet.find('.chatlog-camera-input').val('').trigger('click');
+    });
+    $sheet.find('.chatlog-photo-source.gallery').on('click', () => {
+        $sheet.find('.chatlog-gallery-input').val('').trigger('click');
     });
 
     const close = () => $sheet.remove();
@@ -1100,19 +1271,45 @@ async function uploadImage(dataUrl) {
     return json.path;
 }
 
-// ── 하루로그 (분할 화면) ──────────────────────────────────
-function dayLogView(room) {
+// ── 하루로그 (같은 시간대는 한 장면에 나란히) ────────────
+function groupDayLogPosts(posts) {
+    const groups = new Map();
+    for (const post of posts) {
+        const timestamp = slotTimestamp(post);
+        const date = new Date(timestamp);
+        const key = `${dayKey(timestamp)}:${date.getHours()}`;
+        if (!groups.has(key)) {
+            groups.set(key, {
+                key,
+                hour: date.getHours(),
+                timestamp,
+                posts: [],
+            });
+        }
+        groups.get(key).posts.push(post);
+    }
+    return [...groups.values()]
+        .map(group => ({
+            ...group,
+            posts: group.posts.sort((a, b) => a.createdAt - b.createdAt),
+        }))
+        .sort((a, b) => a.timestamp - b.timestamp);
+}
+
+function dayLogView(room, selectedDay = dayKey(Date.now())) {
     const posts = (state.posts[room.id] || [])
-        .filter(p => dayKey(p.createdAt) === dayKey(Date.now()) && p.image)
-        .sort((a, b) => a.createdAt - b.createdAt);
+        .filter(p => dayKey(slotTimestamp(p)) === selectedDay && p.image)
+        .sort((a, b) => slotTimestamp(a) - slotTimestamp(b) || a.createdAt - b.createdAt);
+    const groups = groupDayLogPosts(posts);
 
     const $sheet = $(`
       <div class="chatlog-sheet">
         <div class="chatlog-sheet-inner chatlog-daylog">
           <div class="chatlog-sheet-title">하루로그</div>
+          <div class="chatlog-daylog-help">같은 시간대 사진은 한 장면에 나란히 저장돼요.</div>
           <div class="chatlog-grid"></div>
           <div class="chatlog-sheet-actions">
-            <div class="menu_button chatlog-export">움짤 저장</div>
+            <div class="menu_button chatlog-export">GIF 저장</div>
             <div class="menu_button chatlog-cancel">닫기</div>
           </div>
           <div class="chatlog-progress"></div>
@@ -1122,17 +1319,28 @@ function dayLogView(room) {
 
     const $grid = $sheet.find('.chatlog-grid');
     const n = posts.length;
-    $grid.addClass(n <= 1 ? 'g1' : n <= 4 ? 'g2' : 'g3');
 
     if (!n) {
-        $grid.html('<div class="chatlog-empty">오늘 사진이 아직 없어요.</div>');
+        $grid.html('<div class="chatlog-empty">이 날의 사진이 아직 없어요.</div>');
     } else {
-        posts.forEach(p => {
-            $grid.append(`
-              <div class="chatlog-cell">
-                <img src="${esc(p.image)}">
-                <span class="chatlog-stamp">${timeLabel(p.createdAt)}</span>
-              </div>`);
+        groups.forEach(group => {
+            const $group = $(`
+              <section class="chatlog-daylog-hour">
+                <div class="chatlog-daylog-hour-label">${String(group.hour).padStart(2, '0')}:00</div>
+                <div class="chatlog-daylog-photos"></div>
+              </section>`);
+            const $photos = $group.find('.chatlog-daylog-photos');
+            const count = group.posts.length;
+            $photos.css('--chatlog-daylog-columns', count === 1 ? 1 : Math.min(count, 3));
+            group.posts.forEach(p => {
+                const author = characterName(room, p.author, p.authorName);
+                $photos.append(`
+                  <div class="chatlog-cell">
+                    <img src="${esc(p.image)}">
+                    <span class="chatlog-stamp">${esc(author)} · ${hhmm(p.createdAt)}</span>
+                  </div>`);
+            });
+            $grid.append($group);
         });
     }
 
@@ -1144,14 +1352,14 @@ function dayLogView(room) {
         if (!n || $btn.hasClass('busy')) return;
         $btn.addClass('busy').text('만드는 중...');
         try {
-            await exportDayLogVideo(posts, room.name, (i, total) => {
+            await exportDayLogGif(groups, room, selectedDay, (i, total) => {
                 $prog.text(`${i} / ${total}`);
             });
             $prog.text('저장 완료');
         } catch (e) {
             $prog.text('실패: ' + e.message);
         } finally {
-            $btn.removeClass('busy').text('움짤 저장');
+            $btn.removeClass('busy').text('GIF 저장');
         }
     });
 
@@ -1276,7 +1484,16 @@ async function createRoomFlow() {
 }
 
 async function markRead(roomId) {
-    try { await api('/read', { roomId }); } catch {}
+    for (const post of state.posts?.[roomId] || []) {
+        post.read = true;
+        for (const comment of post.comments || []) comment.read = true;
+    }
+    updateQuickOpenBadge();
+    try {
+        await api('/read', { roomId });
+    } catch {
+        refreshQuickBadge();
+    }
 }
 
 
@@ -1448,76 +1665,235 @@ function loadImg(src) {
     });
 }
 
-/** 하루로그를 움짤(webm)로 내보내기 — 컷당 0.7초, 켄번스 줌 */
-async function exportDayLogVideo(posts, roomName, onProgress) {
-    const W = 720, H = 960, HOLD = 700;
-    const canvas = document.createElement('canvas');
-    canvas.width = W; canvas.height = H;
-    const g = canvas.getContext('2d');
+function dayLogFrameRects(count, width, height) {
+    if (count <= 1) return [{ x: 0, y: 0, width, height }];
+    const gap = 4;
+    const columns = count === 4 ? 2 : Math.min(count, 3);
+    const rows = Math.ceil(count / columns);
+    const cellWidth = (width - gap * (columns - 1)) / columns;
+    const cellHeight = (height - gap * (rows - 1)) / rows;
+    return Array.from({ length: count }, (_, index) => {
+        const column = index % columns;
+        const row = Math.floor(index / columns);
+        const x = Math.round(column * (cellWidth + gap));
+        const y = Math.round(row * (cellHeight + gap));
+        const nextX = column === columns - 1 ? width : Math.round((column + 1) * (cellWidth + gap) - gap);
+        const nextY = row === rows - 1 ? height : Math.round((row + 1) * (cellHeight + gap) - gap);
+        return { x, y, width: nextX - x, height: nextY - y };
+    });
+}
 
-    const stream = canvas.captureStream(30);
-    const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
-        .find(m => MediaRecorder.isTypeSupported(m));
-    if (!mime) throw new Error('이 브라우저는 영상 녹화를 지원하지 않아요');
+function drawImageCover(g, image, rect) {
+    const scale = Math.max(rect.width / image.width, rect.height / image.height);
+    const sourceWidth = rect.width / scale;
+    const sourceHeight = rect.height / scale;
+    const sourceX = (image.width - sourceWidth) / 2;
+    const sourceY = (image.height - sourceHeight) / 2;
+    g.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight,
+        rect.x, rect.y, rect.width, rect.height);
+}
 
-    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 4_000_000 });
-    const chunks = [];
-    rec.ondataavailable = e => e.data.size && chunks.push(e.data);
-    const done = new Promise(r => { rec.onstop = r; });
-    rec.start();
-
-    for (let i = 0; i < posts.length; i++) {
-        const p = posts[i];
-        onProgress?.(i + 1, posts.length);
-        let img;
-        try { img = await loadImg(p.image); } catch { continue; }
-
-        const start = performance.now();
-        await new Promise(resolve => {
-            const draw = () => {
-                const t = Math.min(1, (performance.now() - start) / HOLD);
-                const zoom = 1.04 + t * 0.05;               // 느린 줌인
-                const dw = W * zoom, dh = H * zoom;
-
-                g.fillStyle = '#000';
-                g.fillRect(0, 0, W, H);
-
-                // cover 맞춤
-                const scale = Math.max(dw / img.width, dh / img.height);
-                const iw = img.width * scale, ih = img.height * scale;
-                g.drawImage(img, (W - iw) / 2, (H - ih) / 2, iw, ih);
-
-                // 시간 스탬프
-                g.fillStyle = 'rgba(0,0,0,0.55)';
-                g.roundRect?.(24, 24, 190, 52, 26);
-                g.fill();
-                g.fillStyle = '#fff';
-                g.font = '600 28px -apple-system, sans-serif';
-                g.textBaseline = 'middle';
-                g.fillText(timeLabel(p.createdAt), 44, 51);
-
-                if (p.text) {
-                    g.fillStyle = 'rgba(0,0,0,0.6)';
-                    g.fillRect(0, H - 110, W, 110);
-                    g.fillStyle = '#fff';
-                    g.font = '550 32px -apple-system, sans-serif';
-                    g.fillText(p.text.slice(0, 24), 40, H - 55);
-                }
-
-                if (t >= 1) resolve();
-                else requestAnimationFrame(draw);
-            };
-            draw();
-        });
+function gifPalette332() {
+    const palette = new Uint8Array(256 * 3);
+    for (let index = 0; index < 256; index++) {
+        palette[index * 3] = Math.round(((index >> 5) & 7) * 255 / 7);
+        palette[index * 3 + 1] = Math.round(((index >> 2) & 7) * 255 / 7);
+        palette[index * 3 + 2] = (index & 3) * 85;
     }
+    return palette;
+}
 
-    rec.stop();
-    await done;
+function quantizeGifFrame(imageData) {
+    const rgba = imageData.data;
+    const indexed = new Uint8Array(rgba.length / 4);
+    for (let source = 0, target = 0; source < rgba.length; source += 4, target++) {
+        indexed[target] = (rgba[source] & 0xe0)
+            | ((rgba[source + 1] & 0xe0) >> 3)
+            | (rgba[source + 2] >> 6);
+    }
+    return indexed;
+}
 
-    const blob = new Blob(chunks, { type: mime });
+function gifLzwEncode(indexedPixels) {
+    const clearCode = 256;
+    const endCode = 257;
+    let nextCode = 258;
+    let codeSize = 9;
+    let bitBuffer = 0;
+    let bitCount = 0;
+    const bytes = [];
+    const dictionary = new Map();
+
+    const writeCode = code => {
+        bitBuffer |= code << bitCount;
+        bitCount += codeSize;
+        while (bitCount >= 8) {
+            bytes.push(bitBuffer & 0xff);
+            bitBuffer >>>= 8;
+            bitCount -= 8;
+        }
+    };
+    const reset = () => {
+        dictionary.clear();
+        nextCode = 258;
+        codeSize = 9;
+    };
+
+    writeCode(clearCode);
+    if (!indexedPixels.length) {
+        writeCode(endCode);
+    } else {
+        let prefix = indexedPixels[0];
+        for (let index = 1; index < indexedPixels.length; index++) {
+            const suffix = indexedPixels[index];
+            const key = prefix * 256 + suffix;
+            const found = dictionary.get(key);
+            if (found !== undefined) {
+                prefix = found;
+                continue;
+            }
+
+            writeCode(prefix);
+            if (nextCode < 4096) {
+                dictionary.set(key, nextCode++);
+                // 디코더는 첫 데이터 코드를 읽은 뒤부터 사전을 추가하므로
+                // 인코더보다 한 항목 늦다. 경계를 한 코드 지나서 비트 수를 올린다.
+                if (nextCode === (1 << codeSize) + 1 && codeSize < 12) codeSize++;
+            } else {
+                writeCode(clearCode);
+                reset();
+            }
+            prefix = suffix;
+        }
+        writeCode(prefix);
+        writeCode(endCode);
+    }
+    if (bitCount > 0) bytes.push(bitBuffer & 0xff);
+    return new Uint8Array(bytes);
+}
+
+function gifDataBlocks(data) {
+    const chunks = [new Uint8Array([8])];
+    for (let offset = 0; offset < data.length; offset += 255) {
+        const size = Math.min(255, data.length - offset);
+        chunks.push(new Uint8Array([size]), data.slice(offset, offset + size));
+    }
+    chunks.push(new Uint8Array([0]));
+    return chunks;
+}
+
+function encodeAnimatedGif(frames, width, height, delayCentiseconds = 140) {
+    const ascii = text => new Uint8Array([...text].map(char => char.charCodeAt(0)));
+    const le16 = value => [value & 0xff, (value >> 8) & 0xff];
+    const chunks = [
+        ascii('GIF89a'),
+        new Uint8Array([...le16(width), ...le16(height), 0xf7, 0, 0]),
+        gifPalette332(),
+        new Uint8Array([
+            0x21, 0xff, 0x0b,
+            ...[...'NETSCAPE2.0'].map(char => char.charCodeAt(0)),
+            0x03, 0x01, 0x00, 0x00, 0x00,
+        ]),
+    ];
+
+    for (const frame of frames) {
+        const compressed = gifLzwEncode(frame);
+        chunks.push(
+            new Uint8Array([
+                0x21, 0xf9, 0x04, 0x00,
+                ...le16(delayCentiseconds), 0x00, 0x00,
+            ]),
+            new Uint8Array([
+                0x2c, 0x00, 0x00, 0x00, 0x00,
+                ...le16(width), ...le16(height), 0x00,
+            ]),
+            ...gifDataBlocks(compressed),
+        );
+    }
+    chunks.push(new Uint8Array([0x3b]));
+
+    const totalLength = chunks.reduce((total, chunk) => total + chunk.length, 0);
+    const output = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+        output.set(chunk, offset);
+        offset += chunk.length;
+    }
+    return output;
+}
+
+/** 시간대마다 한 프레임, 같은 시간대 사진은 한 프레임 안에 나란히 배치한 실제 GIF */
+async function exportDayLogGif(groups, room, selectedDay, onProgress) {
+    const width = 480;
+    const height = 640;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const g = canvas.getContext('2d', { willReadFrequently: true });
+    if (!g) throw new Error('이미지 캔버스를 만들 수 없어요.');
+
+    const frames = [];
+    for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+        const group = groups[groupIndex];
+        onProgress?.(groupIndex + 1, groups.length);
+        const loaded = (await Promise.all(group.posts.map(async post => {
+            try {
+                return { post, image: await loadImg(post.image) };
+            } catch {
+                return null;
+            }
+        }))).filter(Boolean);
+        if (!loaded.length) continue;
+
+        g.fillStyle = '#ffffff';
+        g.fillRect(0, 0, width, height);
+        const rects = dayLogFrameRects(loaded.length, width, height);
+        loaded.forEach(({ post, image }, index) => {
+            const rect = rects[index];
+            drawImageCover(g, image, rect);
+
+            const author = characterName(room, post.author, post.authorName);
+            const label = `${author} · ${hhmm(post.createdAt)}`;
+            g.font = '700 17px -apple-system, "Noto Sans KR", sans-serif';
+            g.textBaseline = 'middle';
+            const labelWidth = Math.min(rect.width - 16, g.measureText(label).width + 20);
+            g.fillStyle = 'rgba(0,0,0,0.58)';
+            g.fillRect(rect.x + 8, rect.y + 8, Math.max(0, labelWidth), 32);
+            g.fillStyle = '#ffffff';
+            g.save();
+            g.beginPath();
+            g.rect(rect.x + 8, rect.y + 8, Math.max(0, labelWidth), 32);
+            g.clip();
+            g.fillText(label, rect.x + 18, rect.y + 24);
+            g.restore();
+
+            if (post.text) {
+                const caption = String(post.text).slice(0, 28);
+                g.fillStyle = 'rgba(0,0,0,0.58)';
+                g.fillRect(rect.x, rect.y + rect.height - 52, rect.width, 52);
+                g.fillStyle = '#ffffff';
+                g.font = '600 18px -apple-system, "Noto Sans KR", sans-serif';
+                g.save();
+                g.beginPath();
+                g.rect(rect.x + 12, rect.y + rect.height - 52, rect.width - 24, 52);
+                g.clip();
+                g.fillText(caption, rect.x + 14, rect.y + rect.height - 25);
+                g.restore();
+            }
+        });
+
+        frames.push(quantizeGifFrame(g.getImageData(0, 0, width, height)));
+        await new Promise(resolve => setTimeout(resolve, 0));
+    }
+    if (!frames.length) throw new Error('GIF로 만들 수 있는 사진이 없어요.');
+
+    onProgress?.(frames.length, frames.length);
+    const bytes = encodeAnimatedGif(frames, width, height);
+    const blob = new Blob([bytes], { type: 'image/gif' });
+    const safeRoomName = String(room.name || 'chatlog').replace(/[\\/:*?"<>|]/g, '_');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `daylog_${roomName}_${dayKey(Date.now())}.webm`;
+    a.download = `daylog_${safeRoomName}_${selectedDay}.gif`;
     document.documentElement.appendChild(a);
     a.click();
     a.remove();
@@ -1661,7 +2037,9 @@ jQuery(async () => {
     $('#chatlog-textmode').on('change', toggleTextMode);
     $('#chatlog-image-provider').on('change', toggleVertexFields);
     $('#chatlog-image-model').on('change', function () {
-        $('#chatlog-image-model-custom').toggle(this.value === '__custom');
+        const custom = this.value === '__custom';
+        $('.chatlog-custom-model-field').toggle(custom);
+        $('#chatlog-image-model-custom').toggle(custom);
     });
     $('#chatlog-test-image').on('click', async () => {
         const $r = $('#chatlog-test-result').text('생성 중...');
@@ -1702,12 +2080,17 @@ jQuery(async () => {
         if (this.checked) syncActiveConnectionProfile();
     });
     $(document).on('input', '#chatlog-active-from, #chatlog-active-to, #chatlog-interval', updateCostHint);
-    await loadSettingsUi();
+    ensureQuickOpenButton();
+    await Promise.all([loadSettingsUi(), refreshQuickBadge()]);
 
     // 연결 프로필 목록은 ST가 늦게 채우는 경우가 있어 몇 번 더 확인한다
     const c0 = ctx();
     if (c0.eventSource && c0.eventTypes?.APP_READY) {
-        c0.eventSource.on(c0.eventTypes.APP_READY, () => refreshProfileSelect());
+        c0.eventSource.on(c0.eventTypes.APP_READY, () => {
+            refreshProfileSelect();
+            ensureQuickOpenButton();
+            refreshQuickBadge();
+        });
     }
     if (c0.eventSource && c0.eventTypes?.SETTINGS_UPDATED) {
     }
@@ -1720,6 +2103,8 @@ jQuery(async () => {
         if ($('#chatlog-follow-profile').is(':checked')) syncActiveConnectionProfile();
         else refreshProfileSelect();
     }, ms));
+    setInterval(ensureQuickOpenButton, 5000);
+    setInterval(refreshQuickBadge, 30000);
 
     registerSlashCommands();
     console.log(`[chatlog] v${CHATLOG_VERSION} 로드됨 — cl.help() 로 디버그 명령 확인`);

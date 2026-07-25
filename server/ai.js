@@ -400,6 +400,28 @@ function postAuthorName(settings, room, post, member = null) {
         || post.author;
 }
 
+/**
+ * 캐릭터끼리 상호작용할 때 양쪽 카드를 분리해 제공한다.
+ * 작성자(member)의 카드는 말투·성격 기준이고, 게시자 카드는 관계·상대 정보 확인용이다.
+ */
+function characterRelationshipBlock(room, post, member) {
+    if (post.author === 'user' || post.author === member?.avatar) return '';
+    const postAuthor = room?.members?.find(candidate => candidate.avatar === post.author);
+    if (!postAuthor) return '';
+    return [
+        '[게시물 작성자 캐릭터 카드 — 상대 정보와 두 캐릭터의 관계 확인용]',
+        charBlock(postAuthor),
+        '',
+        '[캐릭터 간 관계 적용 규칙]',
+        `- 댓글·반응의 말투와 성격은 반드시 "${member.name}"의 카드와 말투 예시를 따른다.`,
+        `- "${postAuthor.name}"의 카드는 상대의 정체성과 두 사람의 관계를 확인하는 용도로만 쓴다.`,
+        '- 두 카드에 서로를 언급한 관계, 호칭, 과거, 감정, 위계가 있으면 자연스럽게 반영한다.',
+        '- 카드에 없는 친분이나 사건을 새로 만들지 않는다.',
+        `- 정보가 충돌하면 "${member.name}" 자신의 관점과 태도는 "${member.name}"의 카드를 우선한다.`,
+        `- "${postAuthor.name}"의 말투를 "${member.name}"의 말투로 섞거나 복사하지 않는다.`,
+    ].join('\n');
+}
+
 // ── 댓글 생성 ─────────────────────────────────────────────
 async function generateComment(settings, room, post, member, options = {}) {
     const api = resolveTextApi(settings);
@@ -414,6 +436,7 @@ async function generateComment(settings, room, post, member, options = {}) {
         ? (post.comments || []).find(c => c.id === options.replyToCommentId && c.author === 'user')
         : [...(post.comments || [])].reverse().find(c => c.author === 'user');
     const isReply = isOwnPost && !!targetUserComment;
+    const characterRelation = characterRelationshipBlock(room, post, member);
     const task = isReply
         ? `네가 챗로그에 올린 게시물에 ${personaName}가 댓글을 달았다. 아래에 [반드시 답할 댓글]로 표시된 바로 그 댓글에 답댓글을 단다.`
         : `${authorName}가 챗로그에 올린 게시물에 댓글을 단다.`;
@@ -421,7 +444,9 @@ async function generateComment(settings, room, post, member, options = {}) {
     const system = [
         `너는 "${member.name}"이다. 아래 인물을 완전히 연기한다.`,
         '',
+        '[댓글 작성자 캐릭터 카드 — 말투·성격·행동의 최우선 기준]',
         charBlock(member),
+        characterRelation ? `\n${characterRelation}` : '',
         persona.description
             ? `\n[이 캐릭터에게 연결된 유저 페르소나]\n이름: ${personaName}\n설명: ${persona.description}`
             : '',
@@ -493,10 +518,13 @@ async function generateReaction(settings, room, post, member) {
     const persona = relationshipPersona(settings, room, member);
     const recent = readRecentChat(settings, member, 5, persona);
     const authorName = postAuthorName(settings, room, post, member);
+    const characterRelation = characterRelationshipBlock(room, post, member);
     const system = [
         `너는 "${member.name}"이다. 아래 인물의 성격대로 반응한다.`,
         '',
+        '[반응 작성자 캐릭터 카드 — 성격·관계 판단의 최우선 기준]',
         charBlock(member),
+        characterRelation ? `\n${characterRelation}` : '',
         recent ? `\n[최근 대화 분위기]\n${recent}` : '',
         '',
         `"${authorName}"의 챗로그 게시물에 이모지 반응 하나를 남긴다.`,
@@ -532,10 +560,13 @@ async function generateEngagement(settings, room, post, member, options = {}) {
     const recent = readRecentChat(settings, member, 6, persona);
     const authorName = postAuthorName(settings, room, post, member);
     const commentWanted = options.commentWanted === true;
+    const characterRelation = characterRelationshipBlock(room, post, member);
     const system = [
         `너는 "${member.name}"이다. 아래 인물을 완전히 연기한다.`,
         '',
+        '[댓글·반응 작성자 캐릭터 카드 — 말투·성격·행동의 최우선 기준]',
         charBlock(member),
+        characterRelation ? `\n${characterRelation}` : '',
         persona.description
             ? `\n[이 캐릭터에게 연결된 유저 페르소나]\n이름: ${persona.name}\n설명: ${persona.description}`
             : '',
@@ -863,4 +894,5 @@ module.exports = {
     timeLabel,
     seasonContext,
     chatPersonaScore,
+    characterRelationshipBlock,
 };
