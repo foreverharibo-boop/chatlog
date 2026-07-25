@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.4.2';
+const CHATLOG_VERSION = '0.6.0';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -425,7 +425,30 @@ function renderRooms() {
     $b.append($new);
 }
 
-// ── 피드 ──────────────────────────────────────────────────
+// ── 피드: 슬롯 페이지 (실물 셋로그 구조) ──────────────────
+const REACT_EMOJIS = ['❤️', '😂', '😮', '🥹', '👍'];
+
+const hhmm = (ts) => {
+    const d = new Date(ts);
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+};
+
+function feedState(room) {
+    view.feed ??= {};
+    const f = view.feed;
+    const posts = (state.posts[room.id] || []).slice().sort((a, b) => a.createdAt - b.createdAt);
+
+    const days = [...new Set(posts.map(p => dayKey(p.createdAt)))];
+    if (!days.includes(dayKey(Date.now()))) days.push(dayKey(Date.now()));
+    if (!f.day || !days.includes(f.day)) f.day = days[days.length - 1];
+
+    const dayPosts = posts.filter(p => dayKey(p.createdAt) === f.day);
+    const slots = [...new Set(dayPosts.map(p => new Date(p.createdAt).getHours()))].sort((a, b) => a - b);
+    if (f.slot == null || !slots.includes(f.slot)) f.slot = slots[slots.length - 1];
+
+    return { posts, days, dayPosts, slots, f };
+}
+
 function renderFeed() {
     const room = state.rooms[view.roomId];
     if (!room) { view.screen = 'rooms'; return render(); }
@@ -433,78 +456,138 @@ function renderFeed() {
     $('.chatlog-title').text(room.name);
     const $b = $('.chatlog-body').empty();
 
-    const posts = (state.posts[room.id] || []).slice().sort((a, b) => b.createdAt - a.createdAt);
+    const { days, dayPosts, slots, f } = feedState(room);
 
-    const $bar = $(`
-      <div class="chatlog-toolbar">
-        <div class="chatlog-chip" data-act="upload"><span class="fa-solid fa-camera"></span> 올리기</div>
-        <div class="chatlog-chip" data-act="daylog"><span class="fa-solid fa-table-cells-large"></span> 하루로그</div>
+    // 상단 바: 날짜 이동 + 올리기/하루로그
+    const di = days.indexOf(f.day);
+    const dateLabel = new Date(dayPosts[0]?.createdAt ?? Date.now())
+        .toLocaleDateString('ko-KR', { month: 'long', day: 'numeric', weekday: 'short' });
+    const $top = $(`
+      <div class="chatlog-slotbar">
+        <span class="chatlog-nav prev fa-solid fa-chevron-left${di <= 0 ? ' off' : ''}"></span>
+        <span class="chatlog-date">${dateLabel}</span>
+        <span class="chatlog-nav next fa-solid fa-chevron-right${di >= days.length - 1 ? ' off' : ''}"></span>
+        <span class="chatlog-slotbtn upload fa-solid fa-camera" title="올리기"></span>
+        <span class="chatlog-slotbtn daylog fa-solid fa-clapperboard" title="하루로그"></span>
       </div>`);
-    $bar.find('[data-act=upload]').on('click', () => uploadSheet(room));
-    $bar.find('[data-act=daylog]').on('click', () => dayLogView(room));
-    $b.append($bar);
+    $top.find('.prev').on('click', () => { if (di > 0) { f.day = days[di - 1]; f.slot = null; render(); } });
+    $top.find('.next').on('click', () => { if (di < days.length - 1) { f.day = days[di + 1]; f.slot = null; render(); } });
+    $top.find('.upload').on('click', () => uploadSheet(room));
+    $top.find('.daylog').on('click', () => dayLogView(room));
+    $b.append($top);
 
-    if (!posts.length) {
-        $b.append('<div class="chatlog-empty">아직 아무것도 없어요.<br><small>지금 눈앞의 한 장을 올려보세요.</small></div>');
+    if (!slots.length) {
+        $b.append('<div class="chatlog-empty">이 날은 기록이 없어요.<br><small>카메라 버튼으로 지금 한 장 올려보세요.</small></div>');
         return;
     }
 
-    let lastDay = null;
-    for (const p of posts) {
-        const dk = dayKey(p.createdAt);
-        if (dk !== lastDay) {
-            lastDay = dk;
-            $b.append(`<div class="chatlog-daysep">${new Date(p.createdAt).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric', weekday: 'short' })}</div>`);
-        }
+    // 슬롯 도트
+    const $dots = $('<div class="chatlog-dots"></div>');
+    slots.forEach(h => {
+        const $d = $(`<span class="chatlog-dot${h === f.slot ? ' on' : ''}" title="${hourLabelShort(h)}"></span>`);
+        $d.on('click', () => { f.slot = h; render(); });
+        $dots.append($d);
+    });
+    $b.append($dots);
+
+    // 이 슬롯의 카드 스택: 올라온 게시물 + 아직 안 올린 참여자의 회색 카드
+    const slotPosts = dayPosts.filter(p => new Date(p.createdAt).getHours() === f.slot);
+    const slotTs = slotPosts[0]?.createdAt ?? Date.now();
+
+    const posted = new Set(slotPosts.map(p => p.author));
+    const $stack = $('<div class="chatlog-stack"></div>');
+
+    for (const p of slotPosts) {
         try {
-            $b.append(postCard(p));
+            $stack.append(slotCard(room, p, null));
         } catch (e) {
-            console.error('[chatlog] 게시물 렌더 실패', p.id, e);
-            $b.append(`<div class="chatlog-post" style="padding:12px;border:1px dashed #533;border-radius:12px;font-size:0.8em;opacity:0.7">렌더 실패 (${esc(p.id)})<br>${esc(e.message)}<br><small>${esc((e.stack||'').split('\n')[1]||'')}</small></div>`);
+            console.error('[chatlog] 카드 렌더 실패', p.id, e);
+            $stack.append(`<div class="chatlog-rendererr">렌더 실패 (${esc(p.id)})<br>${esc(e.message)}</div>`);
         }
     }
+
+    // placeholder: 유저 → 멤버 순
+    if (!posted.has('user')) {
+        $stack.append(placeholderCard(personaForRoom(room).name, avatarUrl('user', room), slotTs));
+    }
+    for (const m of room.members) {
+        if (!posted.has(m.avatar)) {
+            $stack.append(placeholderCard(m.name, avatarUrl(m.avatar, room), slotTs));
+        }
+    }
+
+    $b.append($stack);
 }
 
-function postCard(p) {
-    const room = state.rooms[p.roomId];
-    const name = p.author === 'user' ? personaForRoom(room).name : (p.authorName || p.author);
+function hourLabelShort(h) {
+    return h < 12 ? `오전${h || 12}` : h === 12 ? '오후12' : `오후${h - 12}`;
+}
 
-    const comments = p.comments.map(c => `
+function placeholderCard(name, avatar, ts) {
+    return $(`
+      <article class="chatlog-scard empty">
+        <div class="chatlog-sc-top"><img src="${avatar}"><span>${esc(name)}</span></div>
+        <div class="chatlog-sc-center"><div class="chatlog-sc-time dim">${hhmm(ts)}</div></div>
+      </article>`);
+}
+
+function slotCard(room, p) {
+    const name = p.author === 'user' ? personaForRoom(room).name : (p.authorName || p.author);
+    const reacts = (p.reactions || []).map(r => `<span class="chatlog-react">${esc(r.emoji)}</span>`).join('');
+    const canReply = p.author !== 'user';
+
+    const comments = p.comments.map(c => {
+        const cname = c.author === 'user' ? personaForRoom(room).name : (c.authorName || c.author);
+        return `
       <div class="chatlog-comment${c.read ? '' : ' unread'}">
         <img class="chatlog-cavatar" src="${avatarUrl(c.author, room)}">
-        <div class="chatlog-cbubble"><b>${esc(c.authorName || c.author)}</b> ${esc(c.text)}</div>
-      </div>`).join('');
+        <div class="chatlog-cbubble"><b>${esc(cname)}</b> ${esc(c.text)}</div>
+      </div>`;
+    }).join('');
 
     const $card = $(`
-      <article class="chatlog-post" data-post="${p.id}">
-        <div class="chatlog-frame">
-          ${p.image ? `<img class="chatlog-photo" src="${esc(p.image)}">` : '<div class="chatlog-photo chatlog-nophoto"></div>'}
-          <span class="chatlog-stamp">${timeLabel(p.createdAt)}</span>
-          <div class="chatlog-author">
-            <img src="${avatarUrl(p.author, room)}"><span>${esc(name)}</span>
+      <div class="chatlog-cardwrap">
+        <article class="chatlog-scard${p.image ? ' has-photo' : ' empty'}">
+          ${p.image ? `<img class="chatlog-sc-bg" src="${esc(p.image)}">` : ''}
+          <div class="chatlog-sc-top"><img src="${avatarUrl(p.author, room)}"><span>${esc(name)}</span></div>
+          <div class="chatlog-sc-center">
+            <div class="chatlog-sc-time${p.image ? '' : ' dim'}">${hhmm(p.createdAt)}</div>
+            ${p.text ? `<div class="chatlog-sc-cap">${esc(p.text)}</div>` : ''}
           </div>
-          ${p.text ? `<div class="chatlog-caption">${esc(p.text)}</div>` : ''}
+          <div class="chatlog-sc-corner">
+            ${canReply ? '<span class="chatlog-sc-btn reply fa-solid fa-reply"></span>' : ''}
+            <span class="chatlog-sc-btn smile">🙂</span>
+          </div>
+        </article>
+        <div class="chatlog-reactrow">
+          <div class="chatlog-reacts">${reacts}</div>
+          <div class="chatlog-picker" style="display:none">
+            ${REACT_EMOJIS.map(e => `<span class="chatlog-pick">${e}</span>`).join('')}
+          </div>
+          <div class="chatlog-postactions">
+            ${p.image ? '<span class="chatlog-act" data-act="save"><span class="fa-solid fa-download"></span></span>' : ''}
+            <span class="chatlog-act${p.saved ? ' on' : ''}" data-act="keep"><span class="fa-solid fa-thumbtack"></span></span>
+            <span class="chatlog-act" data-act="del"><span class="fa-solid fa-trash"></span></span>
+          </div>
         </div>
         ${comments ? `<div class="chatlog-comments">${comments}</div>` : ''}
-        <div class="chatlog-postactions">
-          ${p.image ? '<span class="chatlog-act" data-act="save"><span class="fa-solid fa-download"></span> 저장</span>' : ''}
-          <span class="chatlog-act${p.saved ? ' on' : ''}" data-act="keep">
-            <span class="fa-solid fa-thumbtack"></span> ${p.saved ? '보관됨' : '보관'}
-          </span>
-          <span class="chatlog-act" data-act="del"><span class="fa-solid fa-trash"></span></span>
-        </div>
-      </article>`);
+      </div>`);
+
+    $card.find('.smile').on('click', () => $card.find('.chatlog-picker').toggle());
+    $card.find('.chatlog-pick').on('click', async function () {
+        await api('/react', { roomId: p.roomId, postId: p.id, emoji: $(this).text() });
+        refresh();
+    });
+    $card.find('.reply').on('click', () => replySheet(room, p));
 
     $card.find('[data-act=save]').on('click', async () => {
         try { await downloadUrl(p.image, `chatlog_${dayKey(p.createdAt)}_${p.id}.png`); }
         catch (e) { toastr?.error?.('저장 실패: ' + e.message); }
     });
-
     $card.find('[data-act=keep]').on('click', async () => {
         await api('/save', { roomId: p.roomId, postId: p.id, saved: !p.saved });
         refresh();
     });
-
     $card.find('[data-act=del]').on('click', async () => {
         if (!confirm('이 게시물을 지울까요? 사진도 같이 삭제됩니다.')) return;
         await api('/delete', { roomId: p.roomId, postId: p.id });
@@ -512,6 +595,38 @@ function postCard(p) {
     });
 
     return $card;
+}
+
+// ── 답장 시트 ─────────────────────────────────────────────
+function replySheet(room, post) {
+    const $sheet = $(`
+      <div class="chatlog-sheet">
+        <div class="chatlog-sheet-inner">
+          <div class="chatlog-sheet-title">${esc(post.authorName || post.author)}에게 답장</div>
+          ${post.text ? `<div class="chatlog-replyquote">${esc(post.text)}</div>` : ''}
+          <textarea class="chatlog-input" rows="2" maxlength="200" placeholder="답글 남기기"></textarea>
+          <div class="chatlog-sheet-actions">
+            <div class="menu_button chatlog-cancel">취소</div>
+            <div class="menu_button chatlog-send">보내기</div>
+          </div>
+        </div>
+      </div>`);
+    document.documentElement.appendChild($sheet[0]);
+
+    const close = () => $sheet.remove();
+    $sheet.on('click', e => { if (e.target === $sheet[0]) close(); });
+    $sheet.find('.chatlog-cancel').on('click', close);
+    $sheet.find('.chatlog-send').on('click', async () => {
+        const text = $sheet.find('.chatlog-input').val().trim();
+        if (!text) return close();
+        try {
+            await api('/comment/user', { roomId: room.id, postId: post.id, text });
+            close();
+            refresh();
+        } catch (e) {
+            toastr?.error?.('전송 실패: ' + e.message);
+        }
+    });
 }
 
 // ── 올리기 ────────────────────────────────────────────────

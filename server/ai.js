@@ -270,6 +270,7 @@ async function generateComment(settings, room, post, member) {
     if (!api) throw new Error('연결 프로필을 찾을 수 없음');
 
     const recent = readRecentChat(settings, member.name, 8);
+    const isOwnPost = post.author === member.avatar;
 
     const system = [
         `너는 "${member.name}"이다. 아래 인물을 완전히 연기한다.`,
@@ -277,6 +278,9 @@ async function generateComment(settings, room, post, member) {
         charBlock(member),
         recent ? `\n[최근 대화 — 지금 둘 사이의 분위기]\n${recent}` : '',
         '',
+        isOwnPost
+            ? `네가 chatlog에 올린 게시물에 ${settings.userPersonaName || '유저'}가 댓글을 달았다. 거기에 답댓글을 단다.`
+            : '',
         '지금 너는 "챗로그"라는 앱을 쓰고 있다. 친한 사람들끼리 하루 중 아무 순간이나 사진 한 장과 짧은 글로 올리는 앱이다.',
         `${settings.userPersonaName || '유저'}가 방금 게시물을 올렸고, 너는 거기에 댓글을 단다.`,
         '',

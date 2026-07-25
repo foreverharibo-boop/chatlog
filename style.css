@@ -1,9 +1,7 @@
 /* ==========================================================
-   챗로그 — 앱 디자인 이식
-   · 검은 배경 / 흰 텍스트 / 라운드 풀블리드 사진 카드
-   · 좌상단 시간 스탬프, 하단 캡션, 사진 아래 둥둥 뜨는 댓글
-   · 오버레이는 <html>에 append → MovingUI transform 무시, 뷰포트 정중앙
-   · 흐림·그림자 전면 제거
+   chatlog — 셋로그 스타일 (화이트 / 9:16 / 타임라인)
+   오버레이는 <html>에 append → MovingUI transform 무시, 뷰포트 정중앙
+   흐림·그림자 전면 제거
    ========================================================== */
 
 html > .chatlog-overlay,
@@ -14,13 +12,10 @@ html > .chatlog-sheet {
     height: 100dvh !important;
     margin: 0 !important;
     padding: 0 !important;
-
     display: flex !important;
     align-items: center !important;
     justify-content: center !important;
-
-    background: rgba(0, 0, 0, 0.82) !important;
-
+    background: rgba(0, 0, 0, 0.45) !important;
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
     filter: none !important;
@@ -31,7 +26,6 @@ html > .chatlog-sheet {
 html > .chatlog-overlay { z-index: 100000 !important; }
 html > .chatlog-sheet { z-index: 100010 !important; }
 
-/* 내부 전체에서 흐림·그림자 차단 */
 html > .chatlog-overlay *,
 html > .chatlog-sheet * {
     text-shadow: none !important;
@@ -41,23 +35,23 @@ html > .chatlog-sheet * {
     -webkit-backdrop-filter: none !important;
 }
 
-/* ── 앱 셸 ─────────────────────────────────────────────── */
+/* ── 앱 셸: 화이트 ─────────────────────────────────────── */
 .chatlog-app {
     position: relative !important;
     margin: 0 !important;
     inset: auto !important;
     transform: none !important;
 
-    width: min(96vw, 460px);
-    height: min(92dvh, 860px);
+    width: min(96vw, 430px);
+    height: min(94dvh, 900px);
     display: flex;
     flex-direction: column;
     overflow: hidden;
 
-    background: #0a0a0a;
-    color: #f2f2f2;
-    border-radius: 22px;
-    border: 1px solid #1e1e1e;
+    background: #ffffff;
+    color: #191919;
+    border-radius: 24px;
+    border: 1px solid #ececec;
 
     font-family: -apple-system, "Pretendard", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
     letter-spacing: -0.02em;
@@ -69,33 +63,36 @@ html > .chatlog-sheet * {
     grid-template-columns: 32px 1fr 32px;
     align-items: center;
     padding: 14px 14px 10px;
+    background: #ffffff;
 }
 
 .chatlog-title {
     text-align: center;
     font-weight: 700;
     font-size: 1.02em;
+    color: #191919;
 }
 
 .chatlog-back, .chatlog-close {
     cursor: pointer;
-    opacity: 0.55;
+    color: #b5b5b5;
     font-size: 0.95em;
     text-align: center;
 }
-.chatlog-back:hover, .chatlog-close:hover { opacity: 1; }
+.chatlog-back:hover, .chatlog-close:hover { color: #191919; }
 .chatlog-back.hidden { visibility: hidden; }
 
 .chatlog-body {
     flex: 1 1 auto;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
-    padding: 4px 12px 28px;
+    padding: 4px 14px 28px;
+    background: #ffffff;
 }
 
 .chatlog-empty {
     text-align: center;
-    opacity: 0.45;
+    color: #b9b3a9;
     padding: 60px 20px;
     line-height: 1.7;
     font-size: 0.92em;
@@ -106,27 +103,28 @@ html > .chatlog-sheet * {
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 10px 6px;
+    padding: 10px 4px;
     cursor: pointer;
     position: relative;
+    border-radius: 14px;
 }
+.chatlog-roomcard:hover { background: #fafafa; }
 
 .chatlog-roomthumb {
     width: 54px; height: 54px;
-    border-radius: 16px;
+    border-radius: 18px;
     overflow: hidden;
-    background: #171717;
+    background: #f4f2ee;
     display: flex;
     align-items: center;
     justify-content: center;
     flex: 0 0 auto;
-    opacity: 0.95;
 }
 .chatlog-roomthumb img { width: 100%; height: 100%; object-fit: cover; }
-.chatlog-roomthumb span { opacity: 0.3; }
+.chatlog-roomthumb span { color: #d5d0c8; }
 
-.chatlog-roomname { font-weight: 650; font-size: 0.98em; }
-.chatlog-roomsub { font-size: 0.78em; opacity: 0.42; margin-top: 3px; }
+.chatlog-roomname { font-weight: 650; font-size: 0.98em; color: #191919; }
+.chatlog-roomsub { font-size: 0.78em; color: #a8a29a; margin-top: 3px; }
 
 .chatlog-badge {
     margin-left: auto;
@@ -144,53 +142,119 @@ html > .chatlog-sheet * {
     margin-top: 14px;
     padding: 14px;
     text-align: center;
-    border: 1px dashed #262626;
+    border: 1.5px dashed #e4e0d8;
     border-radius: 16px;
-    opacity: 0.5;
+    color: #b0aaa1;
     cursor: pointer;
     font-size: 0.9em;
 }
-.chatlog-newroom:hover { opacity: 0.85; }
+.chatlog-newroom:hover { color: #191919; border-color: #c9c3b8; }
 
 /* ── 툴바 ──────────────────────────────────────────────── */
 .chatlog-toolbar {
     display: flex;
     gap: 8px;
-    padding: 4px 2px 12px;
+    padding: 4px 0 14px;
     position: sticky;
     top: 0;
-    background: #0a0a0a;
+    background: #ffffff;
     z-index: 2;
 }
 
 .chatlog-chip {
     flex: 1;
     text-align: center;
-    padding: 9px;
+    padding: 10px;
     border-radius: 999px;
-    background: #161616;
+    background: #f4f2ee;
+    color: #363636;
     font-size: 0.85em;
+    font-weight: 600;
     cursor: pointer;
 }
-.chatlog-chip:hover { background: #202020; }
+.chatlog-chip:hover { background: #ebe8e2; }
 
 .chatlog-daysep {
     text-align: center;
-    font-size: 0.74em;
-    opacity: 0.32;
-    margin: 18px 0 10px;
-    letter-spacing: 0.02em;
+    font-size: 0.76em;
+    color: #b9b3a9;
+    margin: 20px 0 12px;
+    font-weight: 600;
 }
 
-/* ── 게시물 카드 ───────────────────────────────────────── */
-.chatlog-post { margin-bottom: 22px; }
+/* ── 세로 타임라인 ─────────────────────────────────────── */
+.chatlog-timeline {
+    display: flex;
+    flex-direction: column;
+}
+
+.chatlog-slot {
+    display: grid;
+    grid-template-columns: 64px 1fr;
+    gap: 10px;
+    margin-bottom: 4px;
+}
+
+.chatlog-hour {
+    position: relative;
+    padding-top: 4px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+}
+
+.chatlog-hour span {
+    font-size: 0.68em;
+    font-weight: 700;
+    color: #9a938a;
+    white-space: nowrap;
+    background: #f4f2ee;
+    border-radius: 999px;
+    padding: 3px 8px;
+}
+
+/* 시간 눈금 세로선 */
+.chatlog-hour i {
+    flex: 1;
+    width: 2px;
+    background: #efece6;
+    border-radius: 2px;
+    min-height: 14px;
+}
+
+.chatlog-slot.empty { margin-bottom: 0; }
+.chatlog-slot.empty .chatlog-hour span { background: transparent; color: #d3cec6; }
+.chatlog-slot.empty .chatlog-hour i { min-height: 6px; }
+
+.chatlog-noslot {
+    font-size: 0.72em;
+    color: #d3cec6;
+    padding: 8px 0 10px;
+}
+
+.chatlog-slotcuts {
+    display: flex;
+    gap: 8px;
+    padding-bottom: 14px;
+    min-width: 0;
+}
+
+.chatlog-slotcuts .chatlog-post {
+    flex: 1;
+    min-width: 0;
+}
+
+/* ── 게시물 카드: 9:16 ─────────────────────────────────── */
+.chatlog-post { margin-bottom: 4px; }
 
 .chatlog-frame {
     position: relative;
     border-radius: 20px;
     overflow: hidden;
-    background: #111;
-    aspect-ratio: 3 / 4;
+    background: #f4f2ee;
+    aspect-ratio: 9 / 16;
+    border: 1px solid #eeebe5;
 }
 
 .chatlog-photo {
@@ -199,58 +263,107 @@ html > .chatlog-sheet * {
     display: block;
 }
 .chatlog-nophoto {
-    background: linear-gradient(160deg, #1b1b1b, #101010);
+    background: linear-gradient(160deg, #f7f5f1, #edeae4);
 }
 
-/* 시간 스탬프 — 좌상단 알약 */
 .chatlog-stamp {
     position: absolute;
     top: 10px; left: 10px;
-    background: rgba(0, 0, 0, 0.55);
-    color: #fff;
-    font-size: 0.7em;
-    font-weight: 600;
+    background: rgba(255, 255, 255, 0.88);
+    color: #191919;
+    font-size: 0.68em;
+    font-weight: 700;
     padding: 4px 9px;
     border-radius: 999px;
-    letter-spacing: 0;
 }
 
-/* 작성자 — 우상단 */
 .chatlog-author {
     position: absolute;
     top: 10px; right: 10px;
     display: flex;
     align-items: center;
     gap: 6px;
-    background: rgba(0, 0, 0, 0.55);
+    background: rgba(255, 255, 255, 0.88);
+    color: #191919;
     padding: 3px 9px 3px 3px;
     border-radius: 999px;
-    font-size: 0.72em;
-    font-weight: 600;
+    font-size: 0.7em;
+    font-weight: 700;
+    max-width: 60%;
 }
 .chatlog-author img {
     width: 20px; height: 20px;
     border-radius: 50%;
     object-fit: cover;
+    flex: 0 0 auto;
+}
+.chatlog-author span {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
 }
 
-/* 캡션 — 사진 하단 */
 .chatlog-caption {
     position: absolute;
     left: 0; right: 0; bottom: 0;
-    padding: 34px 14px 14px;
-    font-size: 0.95em;
-    font-weight: 550;
+    padding: 40px 12px 12px;
+    font-size: 0.88em;
+    font-weight: 600;
     line-height: 1.4;
-    background: linear-gradient(to top, rgba(0, 0, 0, 0.75), rgba(0, 0, 0, 0));
+    color: #ffffff;
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0));
+    word-break: break-word;
 }
 
-/* ── 댓글 — 카드 아래 둥둥 ─────────────────────────────── */
+/* ── 반응 줄 (스마일) ──────────────────────────────────── */
+.chatlog-reactrow {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 2px 0;
+    position: relative;
+    flex-wrap: wrap;
+}
+
+.chatlog-reacts { display: flex; gap: 2px; }
+.chatlog-react { font-size: 1.0em; }
+
+.chatlog-addreact {
+    cursor: pointer;
+    filter: grayscale(1) !important;
+    opacity: 0.45;
+    font-size: 1.05em;
+}
+.chatlog-addreact:hover { filter: none !important; opacity: 1; }
+
+.chatlog-picker {
+    display: flex;
+    gap: 8px;
+    background: #ffffff;
+    border: 1px solid #ececec;
+    border-radius: 999px;
+    padding: 6px 12px;
+}
+.chatlog-pick { cursor: pointer; font-size: 1.15em; }
+.chatlog-pick:hover { transform: scale(1.2); }
+
+.chatlog-postactions {
+    margin-left: auto;
+    display: flex;
+    gap: 12px;
+    color: #c9c3ba;
+    font-size: 0.78em;
+}
+.chatlog-act { cursor: pointer; }
+.chatlog-act:hover { color: #191919; }
+.chatlog-act.on { color: #e0a63f; }
+
+/* ── 댓글 ──────────────────────────────────────────────── */
 .chatlog-comments {
     display: flex;
     flex-direction: column;
     gap: 7px;
-    padding: 10px 6px 0;
+    padding: 8px 2px 0;
 }
 
 .chatlog-comment {
@@ -268,38 +381,49 @@ html > .chatlog-sheet * {
 }
 
 .chatlog-cbubble {
-    background: #171717;
+    background: #f4f2ee;
+    color: #2c2c2c;
     border-radius: 4px 16px 16px 16px;
     padding: 8px 12px;
-    font-size: 0.85em;
+    font-size: 0.82em;
     line-height: 1.45;
-    max-width: 82%;
+    max-width: 85%;
+    word-break: break-word;
 }
 .chatlog-cbubble b {
     display: block;
     font-size: 0.85em;
-    opacity: 0.45;
-    font-weight: 600;
+    color: #a39d94;
+    font-weight: 700;
     margin-bottom: 2px;
 }
 
 .chatlog-comment.unread .chatlog-cbubble {
-    background: #1d1a15;
-    border: 1px solid #3a2f16;
+    background: #fdf6e5;
+    border: 1px solid #f2e2b8;
+}
+
+.chatlog-rendererr {
+    padding: 12px;
+    border: 1px dashed #e6b8b8;
+    border-radius: 12px;
+    font-size: 0.78em;
+    color: #b06060;
+    flex: 1;
 }
 
 /* ── 시트 (올리기 / 하루로그) ──────────────────────────── */
 .chatlog-sheet-inner {
     position: relative !important;
     margin: 0 !important;
-    width: min(94vw, 420px);
+    width: min(94vw, 400px);
     max-height: 88dvh;
     overflow-y: auto;
-    background: #0f0f0f;
-    border: 1px solid #212121;
-    border-radius: 22px;
+    background: #ffffff;
+    border: 1px solid #ececec;
+    border-radius: 24px;
     padding: 20px 18px;
-    color: #f2f2f2;
+    color: #191919;
     font-family: -apple-system, "Pretendard", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
     letter-spacing: -0.02em;
 }
@@ -308,52 +432,60 @@ html > .chatlog-sheet * {
     font-weight: 700;
     margin-bottom: 14px;
     text-align: center;
+    color: #191919;
 }
 
 .chatlog-preview {
-    aspect-ratio: 3 / 4;
+    aspect-ratio: 9 / 16;
+    max-height: 46dvh;
+    margin: 0 auto;
     border-radius: 18px;
-    background: #161616;
+    background: #f4f2ee;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     gap: 8px;
     cursor: pointer;
-    opacity: 0.6;
+    color: #b9b3a9;
     overflow: hidden;
 }
-.chatlog-preview:hover { opacity: 0.9; }
+.chatlog-preview:hover { color: #191919; }
 .chatlog-preview img { width: 100%; height: 100%; object-fit: cover; }
 .chatlog-preview small { font-size: 0.8em; }
 
 .chatlog-input {
     width: 100%;
     margin-top: 12px;
-    background: #161616;
+    background: #f4f2ee;
     border: none;
     border-radius: 14px;
     padding: 12px;
-    color: #f2f2f2;
+    color: #191919;
     font: inherit;
     resize: none;
 }
-.chatlog-input::placeholder { color: #555; }
+.chatlog-input::placeholder { color: #b9b3a9; }
 
 .chatlog-sheet-actions {
     display: flex;
     gap: 8px;
     margin-top: 14px;
 }
-.chatlog-sheet-actions .menu_button { flex: 1; }
+.chatlog-sheet-actions .menu_button {
+    flex: 1;
+    background: #f4f2ee !important;
+    color: #191919 !important;
+    border: none !important;
+}
 
-/* ── 하루로그 분할 화면 ────────────────────────────────── */
+/* ── 하루로그 그리드 ───────────────────────────────────── */
 .chatlog-grid {
     display: grid;
     gap: 3px;
     border-radius: 18px;
     overflow: hidden;
-    background: #000;
+    background: #f0ede8;
 }
 .chatlog-grid.g1 { grid-template-columns: 1fr; }
 .chatlog-grid.g2 { grid-template-columns: 1fr 1fr; }
@@ -361,11 +493,22 @@ html > .chatlog-sheet * {
 
 .chatlog-cell {
     position: relative;
-    aspect-ratio: 1 / 1;
+    aspect-ratio: 9 / 16;
     overflow: hidden;
+    background: #f4f2ee;
 }
 .chatlog-cell img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .chatlog-cell .chatlog-stamp { top: 5px; left: 5px; font-size: 0.6em; padding: 2px 6px; }
+
+.chatlog-progress {
+    text-align: center;
+    font-size: 0.78em;
+    color: #a8a29a;
+    min-height: 16px;
+    margin-top: 8px;
+}
+.chatlog-export.busy { opacity: 0.5; pointer-events: none; }
+.chatlog-export.disabled { opacity: 0.3; pointer-events: none; }
 
 /* ── 캐릭터 선택 ───────────────────────────────────────── */
 .chatlog-charpick { max-height: 50vh; overflow-y: auto; text-align: left; }
@@ -375,39 +518,189 @@ html > .chatlog-sheet * {
 }
 .chatlog-charrow img { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; }
 
-/* ── 확장 탭 설정 ──────────────────────────────────────── */
+/* ── 확장 탭 설정 (ST 테마 따라감) ─────────────────────── */
 .chatlog-settings .chatlog-row { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
 .chatlog-settings .chatlog-row .text_pole { flex: 1 1 auto; min-width: 0; }
 .chatlog-settings .chatlog-actions { margin-top: 12px; }
 .chatlog-settings small { display: block; opacity: 0.6; margin: 2px 0 8px; line-height: 1.35; }
 .chatlog-settings label { display: block; margin-top: 10px; font-weight: 600; }
+.chatlog-settings #chatlog-profile-refresh { flex: 0 0 auto; padding: 6px 10px; }
 
-/* ── 게시물 액션 ───────────────────────────────────────── */
-.chatlog-postactions {
+/* ══════════════════════════════════════════
+   v0.6.0 — 실물 셋로그 슬롯 페이지
+   ══════════════════════════════════════════ */
+
+.chatlog-slotbar {
     display: flex;
-    gap: 14px;
-    padding: 9px 8px 0;
-    font-size: 0.76em;
-    opacity: 0.42;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 2px 10px;
+    position: sticky;
+    top: 0;
+    background: #ffffff;
+    z-index: 2;
 }
-.chatlog-act { cursor: pointer; }
-.chatlog-act:hover { opacity: 1; }
-.chatlog-act.on { opacity: 1; color: #ffcf5c; }
-.chatlog-postactions [data-act="del"] { margin-left: auto; }
 
-/* ── 진행 표시 ─────────────────────────────────────────── */
-.chatlog-progress {
+.chatlog-date {
+    font-weight: 700;
+    font-size: 0.9em;
+    color: #191919;
+}
+
+.chatlog-nav {
+    width: 30px; height: 30px;
+    border-radius: 50%;
+    background: #f4f2ee;
+    color: #6b6b6b;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.72em;
+    cursor: pointer;
+}
+.chatlog-nav.off { opacity: 0.3; pointer-events: none; }
+
+.chatlog-slotbtn {
+    width: 34px; height: 34px;
+    border-radius: 50%;
+    background: #f4f2ee;
+    color: #363636;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.8em;
+    cursor: pointer;
+}
+.chatlog-slotbtn:hover { background: #ebe8e2; }
+.chatlog-slotbtn.upload { margin-left: auto; }
+
+/* 슬롯 도트 */
+.chatlog-dots {
+    display: flex;
+    justify-content: center;
+    gap: 9px;
+    padding: 2px 0 14px;
+}
+.chatlog-dot {
+    width: 11px; height: 11px;
+    border-radius: 50%;
+    background: #f0b6dd;
+    opacity: 0.55;
+    cursor: pointer;
+}
+.chatlog-dot:hover { opacity: 0.85; }
+.chatlog-dot.on {
+    opacity: 1;
+    background: #111;
+    outline: 2px solid #111;
+    outline-offset: 2px;
+}
+
+/* 카드 스택 */
+.chatlog-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.chatlog-cardwrap { display: flex; flex-direction: column; }
+
+.chatlog-scard {
+    position: relative;
+    border-radius: 24px;
+    overflow: hidden;
+    aspect-ratio: 16 / 10;
+    background: #e9e6e1;
+}
+
+.chatlog-scard .chatlog-sc-bg {
+    position: absolute;
+    inset: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+}
+
+.chatlog-sc-top {
+    position: absolute;
+    top: 12px; left: 12px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    z-index: 2;
+    font-weight: 700;
+    font-size: 0.82em;
+}
+.chatlog-sc-top img {
+    width: 30px; height: 30px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid rgba(255,255,255,0.9);
+}
+.chatlog-scard.has-photo .chatlog-sc-top span { color: #fff; }
+.chatlog-scard.empty .chatlog-sc-top span { color: #8f8a83; }
+
+.chatlog-sc-center {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    z-index: 1;
+    padding: 0 16px;
     text-align: center;
-    font-size: 0.78em;
-    opacity: 0.5;
-    min-height: 16px;
-    margin-top: 8px;
 }
-.chatlog-export.busy { opacity: 0.5; pointer-events: none; }
-.chatlog-export.disabled { opacity: 0.3; pointer-events: none; }
 
-/* 설정 탭 프로필 새로고침 버튼 */
-.chatlog-settings #chatlog-profile-refresh {
-    flex: 0 0 auto;
-    padding: 6px 10px;
+.chatlog-sc-time {
+    font-size: 2.1em;
+    font-weight: 800;
+    letter-spacing: 0.01em;
+    color: #ffffff;
+}
+.chatlog-sc-time.dim { color: #cfcac2; }
+
+.chatlog-sc-cap {
+    font-size: 0.85em;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.95);
+    word-break: break-word;
+    max-width: 90%;
+}
+
+/* 사진 위 글씨 가독성용 은은한 중앙 그늘 (그림자 아님, 배경 레이어) */
+.chatlog-scard.has-photo .chatlog-sc-center {
+    background: radial-gradient(ellipse at center, rgba(0,0,0,0.28), rgba(0,0,0,0) 70%);
+}
+
+.chatlog-sc-corner {
+    position: absolute;
+    right: 12px; bottom: 12px;
+    display: flex;
+    gap: 10px;
+    z-index: 2;
+}
+
+.chatlog-sc-btn {
+    width: 34px; height: 34px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.88);
+    color: #191919;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 0.85em;
+}
+.chatlog-sc-btn.smile { font-size: 1.0em; }
+.chatlog-sc-btn:hover { background: #ffffff; }
+
+.chatlog-replyquote {
+    background: #f4f2ee;
+    border-radius: 12px;
+    padding: 10px 12px;
+    font-size: 0.82em;
+    color: #6d675f;
+    margin-bottom: 10px;
+    word-break: break-word;
 }

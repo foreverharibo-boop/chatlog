@@ -362,6 +362,45 @@ async function init(router) {
         }
     });
 
+    // 유저 답글 — 캐릭터 게시물이면 그 캐릭터의 대댓글을 예약
+    router.post('/comment/user', (req, res) => {
+        const { roomId, postId, text } = req.body || {};
+        const room = db.rooms[roomId];
+        const post = findPost(roomId, postId);
+        if (!room || !post) return res.status(404).json({ error: 'post not found' });
+        if (!text?.trim()) return res.status(400).json({ error: 'empty' });
+
+        post.comments.push({
+            id: uid('c'), author: 'user', authorName: null,
+            text: text.trim().slice(0, 200), createdAt: Date.now(), read: true,
+        });
+
+        if (post.author !== 'user') {
+            const minMs = settings.commentDelayMinMin * 60000;
+            const maxMs = settings.commentDelayMaxMin * 60000;
+            db.jobs.push({
+                id: uid('job'), type: 'comment',
+                roomId, postId, charId: post.author,
+                runAt: Date.now() + rand(minMs, maxMs),
+            });
+        }
+        saveDb();
+        res.json({ ok: true });
+    });
+
+    // 이모지 반응 토글
+    router.post('/react', (req, res) => {
+        const { roomId, postId, emoji } = req.body || {};
+        const post = findPost(roomId, postId);
+        if (!post) return res.status(404).json({ error: 'post not found' });
+        post.reactions ??= [];
+        const i = post.reactions.findIndex(r => r.author === 'user' && r.emoji === emoji);
+        if (i >= 0) post.reactions.splice(i, 1);
+        else post.reactions.push({ author: 'user', emoji });
+        saveDb();
+        res.json({ ok: true, reactions: post.reactions });
+    });
+
     // 저장 표시 토글 (자동 정리에서 제외)
     router.post('/save', (req, res) => {
         const { roomId, postId, saved = true } = req.body || {};
