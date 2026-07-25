@@ -31,9 +31,28 @@ function dayKey(ts) {
     return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
 }
 
+// ── 페르소나(유저) 아바타 — 현재 선택된 페르소나를 자동 추적 ──
+let userAvatarUrl = '/img/user-default.png';
+
+async function resolveUserAvatar() {
+    // 1) personas 모듈이 현재 페르소나 파일명을 export 함
+    try {
+        const mod = await import('/scripts/personas.js');
+        const file = mod?.user_avatar;
+        if (file) {
+            userAvatarUrl = `/User Avatars/${encodeURIComponent(file)}`;
+            return;
+        }
+    } catch { /* 구버전 ST */ }
+
+    // 2) 폴백: 채팅에 렌더된 유저 메시지의 아바타 src 그대로
+    const domSrc = $('.mes[is_user="true"]').last().find('.avatar img').attr('src');
+    if (domSrc) userAvatarUrl = domSrc;
+}
+
 function avatarUrl(avatar) {
     return avatar === 'user'
-        ? (ctx().userAvatar ? `/User Avatars/${ctx().userAvatar}` : '/img/user-default.png')
+        ? userAvatarUrl
         : `/thumbnail?type=avatar&file=${encodeURIComponent(avatar)}`;
 }
 
@@ -329,7 +348,7 @@ function openChatlog() {
     $overlay.find('.chatlog-back').on('click', () => { view.screen = 'rooms'; render(); });
 
     view = { screen: 'rooms', roomId: null };
-    refresh();
+    resolveUserAvatar().then(refresh);
 }
 
 function closeChatlog() { $overlay?.remove(); $overlay = null; }
@@ -1031,8 +1050,12 @@ jQuery(async () => {
     // 연결 프로필 목록은 ST가 늦게 채우는 경우가 있어 몇 번 더 확인한다
     const c0 = ctx();
     if (c0.eventSource && c0.eventTypes?.APP_READY) {
-        c0.eventSource.on(c0.eventTypes.APP_READY, () => refreshProfileSelect());
+        c0.eventSource.on(c0.eventTypes.APP_READY, () => { refreshProfileSelect(); resolveUserAvatar(); });
     }
+    if (c0.eventSource && c0.eventTypes?.SETTINGS_UPDATED) {
+        c0.eventSource.on(c0.eventTypes.SETTINGS_UPDATED, () => resolveUserAvatar());
+    }
+    resolveUserAvatar();
     [500, 1500, 4000].forEach(ms => setTimeout(() => {
         if (getProfiles().length) refreshProfileSelect();
     }, ms));
