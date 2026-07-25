@@ -27,6 +27,7 @@ let db = { rooms: {}, posts: {}, jobs: [] };
 
 let settings = {
     profileName: '',        // ST 연결 프로필 이름 (텍스트 생성용)
+    followActiveProfile: true, // 클라이언트가 ST의 현재 연결 프로필을 자동 동기화
     userHandle: 'default-user',
     imageApiKey: '',        // 이미지 생성 키만 별도
     textMode: 'express',                         // 'express' = 이미지와 같은 키로 텍스트도 생성 | 'profile' = ST 연결 프로필

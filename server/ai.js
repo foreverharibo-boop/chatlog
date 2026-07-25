@@ -50,22 +50,45 @@ function resolveTextApi(settings) {
     };
 }
 
-// ── 캐릭터 프사 읽기 (폴라로이드 패턴: 외모 일관성용 레퍼런스) ──
-function readAvatar(settings, avatarFile) {
-    if (!avatarFile) return null;
-    const userDir = path.join(ST_ROOT, 'data', settings.userHandle || 'default-user');
-    const candidates = [
-        path.join(userDir, 'characters', avatarFile),
-        path.join(ST_ROOT, 'public', 'characters', avatarFile),
-    ];
-    for (const p of candidates) {
+function imageMime(file) {
+    const ext = path.extname(file || '').toLowerCase();
+    if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+    if (ext === '.webp') return 'image/webp';
+    if (ext === '.gif') return 'image/gif';
+    if (ext === '.avif') return 'image/avif';
+    return 'image/png';
+}
+
+function readReferenceFile(candidates, label, filename) {
+    for (const candidate of candidates) {
         try {
-            const buf = fs.readFileSync(p);
-            return { mime: 'image/png', data: buf.toString('base64') };
+            const buf = fs.readFileSync(candidate);
+            return { mime: imageMime(candidate), data: buf.toString('base64') };
         } catch { /* 다음 후보 */ }
     }
-    console.warn('[chatlog] 프사를 못 찾음:', avatarFile);
+    console.warn(`[chatlog] ${label} 프사를 못 찾음:`, filename);
     return null;
+}
+
+// ── 프사 읽기 (이미지 속 인물 외모 일관성용 레퍼런스) ─────────
+function readAvatar(settings, avatarFile) {
+    if (!avatarFile) return null;
+    const filename = path.basename(String(avatarFile));
+    const userDir = path.join(ST_ROOT, 'data', settings.userHandle || 'default-user');
+    return readReferenceFile([
+        path.join(userDir, 'characters', filename),
+        path.join(ST_ROOT, 'public', 'characters', filename),
+    ], '캐릭터', filename);
+}
+
+function readPersonaAvatar(settings, avatarFile) {
+    if (!avatarFile) return null;
+    const filename = path.basename(String(avatarFile));
+    const userDir = path.join(ST_ROOT, 'data', settings.userHandle || 'default-user');
+    return readReferenceFile([
+        path.join(userDir, 'User Avatars', filename),
+        path.join(ST_ROOT, 'public', 'User Avatars', filename),
+    ], '페르소나', filename);
 }
 
 // ── 최근 대화 읽기 ────────────────────────────────────────
@@ -251,6 +274,27 @@ const timeLabel = (ts) => {
     return `${ampm} ${h % 12 || 12}시 ${String(d.getMinutes()).padStart(2, '0')}분`;
 };
 
+function seasonContext(ts) {
+    const d = new Date(ts);
+    const month = d.getMonth() + 1;
+    const [seasonKo, seasonEn] = month === 12 || month <= 2
+        ? ['겨울', 'winter']
+        : month <= 5
+            ? ['봄', 'spring']
+            : month <= 8
+                ? ['여름', 'summer']
+                : ['가을', 'autumn'];
+    return {
+        year: d.getFullYear(),
+        month,
+        day: d.getDate(),
+        hour: d.getHours(),
+        seasonKo,
+        seasonEn,
+        label: `${d.getFullYear()}년 ${month}월 ${d.getDate()}일 ${seasonKo}`,
+    };
+}
+
 function charBlock(member) {
     return [
         `이름: ${member.name}`,
@@ -389,6 +433,7 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
     const forcePost = !!decision.forcePost;
     const personaName = room.persona?.name || settings.userPersonaName || '유저';
     const personaDescription = room.persona?.description || '';
+    const temporal = seasonContext(slotAt);
 
     const system = [
         `너는 "${member.name}"이다.`,
@@ -413,7 +458,7 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
         '- 캐릭터 카드에 없는 신체 상태·직업·가족관계를 캐릭터 본인에게 새로 부여하지 마라.',
         '',
         'JSON만 출력한다. 마크다운 코드펜스 금지.',
-        '{"post": true 또는 false, "caption": "캐릭터 시점의 25자 이내 SNS 캡션", "scene": "사진 장면을 영어로 묘사", "roleCheck": "캐릭터와 유저가 각각 무엇을 하는지 짧게 확인"}',
+        '{"post": true 또는 false, "caption": "캐릭터 시점의 25자 이내 SNS 캡션", "scene": "사진 장면을 영어로 묘사", "visualIdentity": "게시 캐릭터의 눈에 보이는 외형만 영어 200자 이내", "personaVisible": true 또는 false, "personaVisualIdentity": "페르소나가 보일 때 페르소나의 눈에 보이는 외형만 영어 200자 이내", "roleCheck": "캐릭터와 유저가 각각 무엇을 하는지 짧게 확인"}',
         '',
         '게시 여부 규칙:',
         forcePost
@@ -427,6 +472,11 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
             : '- 랜덤 게시 충동이 선택한 기준 이상일 때만 post를 true로 한다.',
         '- 지금 실제로 찍어 공유할 만한 순간이 없으면 post는 false다.',
         '- post가 false면 caption과 scene은 빈 문자열로 둔다.',
+        '- post가 true면 visualIdentity에는 캐릭터 카드에서 확인되는 성별, 대략적 나이, 머리, 얼굴, 체격, 현재 옷처럼 사진에 필요한 외형만 짧게 쓴다.',
+        '- visualIdentity에 성격, 관계, 과거사, 직업 설명, 유저 정보, 신체 상태에 관한 추측을 넣지 마라.',
+        `- 사진 안에 유저 페르소나(${personaName})가 실제로 보일 때만 personaVisible을 true로 한다.`,
+        `- personaVisible이 true면 personaVisualIdentity에는 유저 페르소나 설명에서 확인되는 외형과 계절에 맞는 현재 옷차림만 쓴다. 캐릭터(${member.name})의 외형과 섞지 마라.`,
+        '- personaVisible이 false면 personaVisualIdentity는 빈 문자열로 둔다.',
         '',
         'post가 true일 때 scene 규칙:',
         '- 캐릭터 카드에 적힌 직업, 취미, 성격, 생활 방식과 최근 관계 상황이 자연스럽게 함께 드러나는 일상을 만든다.',
@@ -442,10 +492,13 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
         `- 사람이 나오는 scene에는 반드시 "front-facing smartphone selfie taken by ${member.name}" 또는 "mirror selfie taken by ${member.name}"라고 명시한다.`,
         '- 폰으로 방금 대충 찍어 바로 올린 스냅이어야 한다. 구도가 조금 어긋나도 좋다.',
         '- 조명·장소·사물을 구체적으로. 추상적 표현 금지.',
+        `- 현재 달력은 ${temporal.label}이다. 장면의 옷차림, 자연광의 길이와 색, 식생과 주변 환경을 ${temporal.seasonKo}에 자연스럽게 맞춘다.`,
+        '- 계절만 보고 비·눈·폭염 같은 정확한 날씨를 임의로 만들지는 마라.',
+        '- 장면에 명시된 지역이 남반구·열대이거나 실내 환경이라면 그 지역과 장소의 조건을 계절 일반값보다 우선한다.',
     ].filter(Boolean).join('\n');
 
     const user = [
-        `지금은 ${timeLabel(slotAt)}이다.`,
+        `현재 날짜와 시각은 ${temporal.label}, ${timeLabel(slotAt)}이다.`,
         `이번 랜덤 게시 충동은 ${decision.randomRoll ?? 50}/99이다.`,
         `활동 시간 기준 마지막 게시 후 약 ${Number(decision.activeHoursSinceLastPost || 0).toFixed(1)}시간 지났다.`,
         forcePost
@@ -468,54 +521,96 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
     let image = null;
     if (parsed.scene && settings.imageApiKey) {
         try {
+            const references = [
+                {
+                    role: 'posting character',
+                    name: member.name,
+                    image: readAvatar(settings, member.avatar),
+                },
+            ];
+            if (parsed.personaVisible === true || parsed.personaVisible === 'true') {
+                references.push({
+                    role: 'user persona',
+                    name: personaName,
+                    image: readPersonaAvatar(settings, room.persona?.avatar),
+                });
+            }
             image = await generateImage(
                 settings,
                 parsed.scene,
-                readAvatar(settings, member.avatar),
+                references,
                 member,
                 room.persona,
+                parsed.visualIdentity,
+                parsed.personaVisualIdentity,
+                `${temporal.label} (${temporal.seasonEn}), ${timeLabel(slotAt)}`,
             );
         } catch (e) {
             console.error('[chatlog] 이미지 생성 실패:', e.message);
+            throw e;
         }
     }
 
+    if (!image) throw new Error('이미지를 만들지 못해 게시물을 저장하지 않음');
     return { skipped: false, text: (parsed.caption || '').slice(0, 60), image };
 }
 
 // ── 이미지 생성 ───────────────────────────────────────────
-async function generateImage(settings, scene, reference = null, member = null, persona = null) {
-    let prompt = `${scene}. Casual amateur phone snapshot taken moments ago for an immediate social post, natural available light, slightly imperfect framing, no text, no watermark. If any person appears anywhere in the image, the photo must be a believable front-facing smartphone selfie, arm's-length selfie, or mirror selfie taken by the posting character, who must also be visibly present in frame. If multiple people appear, compose them together as a group selfie. Never use a third-person camera angle, candid observer view, tripod shot, surveillance view, cinematic still, or a photo taken by someone else. If no person appears, a normal first-person phone photo of scenery, food, or objects is allowed.`;
-
-    if (member) {
-        const identity = [
-            member.name && `Name: ${member.name}`,
-            member.description && `Character description: ${String(member.description).slice(0, 1200)}`,
-        ].filter(Boolean).join('. ');
-        if (identity) {
-            prompt += ` The person posting this photo is the character: ${identity}. Preserve the character's stated gender, age, occupation, appearance and physical identity.`;
+function findGeneratedImage(json) {
+    for (const candidate of json?.candidates || []) {
+        for (const part of candidate?.content?.parts || []) {
+            const inline = part?.inline_data || part?.inlineData;
+            if (inline?.data) return inline;
         }
     }
+    return null;
+}
 
-    if (persona?.name || persona?.description) {
-        const relationshipPerson = [
-            persona.name && `Name: ${persona.name}`,
-            persona.description && `Description: ${String(persona.description).slice(0, 800)}`,
-        ].filter(Boolean).join('. ');
-        prompt += ` A separate person in the relationship context is the user persona: ${relationshipPerson}. Their condition, job and actions may influence the scene, but never transfer those traits to the posting character. Keep both people's roles and bodies distinct.`;
-    }
+function imageResponseSummary(json) {
+    const reasons = (json?.candidates || []).map(c => c.finishReason).filter(Boolean);
+    const text = (json?.candidates || [])
+        .flatMap(c => c?.content?.parts || [])
+        .map(part => part?.text)
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .slice(0, 180);
+    return [reasons.length ? `finish=${reasons.join(',')}` : '', text]
+        .filter(Boolean)
+        .join(' · ') || '빈 응답';
+}
 
-    if (reference) {
-        // 폴라로이드 패턴 — 프사를 외모 기준으로 고정
-        prompt += ' If the character appears in the frame, their face, hairstyle, hair color and gender presentation must match the attached reference image and character description. Do not invent or substitute a different person.';
-    }
+function normalizeReferences(references) {
+    const list = Array.isArray(references)
+        ? references
+        : references
+            ? [references]
+            : [];
+    return list
+        .map((reference, index) => reference?.image
+            ? reference
+            : {
+                role: index === 0 ? 'posting character' : `person ${index + 1}`,
+                name: '',
+                image: reference,
+            })
+        .filter(reference => reference?.image?.data);
+}
 
-    if (!settings.imageApiKey) throw new Error('이미지 API 키가 비어 있습니다');
-
+async function requestGeneratedImage(settings, prompt, references = []) {
     const parts = [{ text: prompt }];
-    if (reference) parts.push({ inline_data: { mime_type: reference.mime, data: reference.data } });
-
-    const json = await callGoogle({
+    for (const [index, reference] of normalizeReferences(references).entries()) {
+        parts.push({
+            text: `Reference image ${index + 1}: ${reference.role || 'person'}${reference.name ? ` "${reference.name}"` : ''}. Keep this person distinct from every other reference.`,
+        });
+        parts.push({
+            inline_data: {
+                mime_type: reference.image.mime,
+                data: reference.image.data,
+            },
+        });
+    }
+    return callGoogle({
         provider: settings.imageProvider === 'vertex' ? 'vertex' : 'aistudio',
         model: settings.imageModel,
         apiKey: settings.imageApiKey,
@@ -523,16 +618,76 @@ async function generateImage(settings, scene, reference = null, member = null, p
         region: settings.imageRegion,
     }, {
         contents: [{ role: 'user', parts }],
+        generationConfig: {
+            responseModalities: ['Image'],
+        },
     });
+}
 
-    const part = json?.candidates?.[0]?.content?.parts?.find(p => p.inline_data || p.inlineData);
-    const inline = part?.inline_data || part?.inlineData;
-    if (!inline) throw new Error('이미지 데이터 없음');
+async function generateImage(
+    settings,
+    scene,
+    references = [],
+    member = null,
+    persona = null,
+    visualIdentity = '',
+    personaVisualIdentity = '',
+    temporalContext = '',
+) {
+    if (!settings.imageApiKey) throw new Error('이미지 API 키가 비어 있습니다');
 
-    // ST public 아래에 직접 저장 (서버라 /api/images/upload 안 거쳐도 됨)
+    const usableReferences = normalizeReferences(references);
+    const posterName = member?.name || 'the posting character';
+    const visible = String(visualIdentity || '').trim().slice(0, 500);
+    const personaVisible = String(personaVisualIdentity || '').trim().slice(0, 500);
+    const identityRule = [
+        `The person posting this photo is ${posterName}.`,
+        visible ? `Visible identity of ${posterName}: ${visible}.` : '',
+        'Preserve the posting character’s gender, age, face, hair and build.',
+        persona?.name
+            ? `${persona.name} is a separate person from the posting character; never merge their bodies, conditions or actions.`
+            : '',
+        personaVisible && persona?.name
+            ? `Visible identity of user persona ${persona.name}: ${personaVisible}. Preserve their face, hair, age, build and clothing separately.`
+            : '',
+    ].filter(Boolean).join(' ');
+    const cameraRule = 'If any person appears, make it a believable front-facing smartphone selfie, arm’s-length selfie, or mirror selfie taken by the posting character, who must be visible in frame. Multiple people must appear together in a group selfie. Never use a third-person, candid observer, tripod, surveillance, cinematic, or someone-else-took-it angle. If no person appears, use a first-person phone photo of scenery, food, or objects.';
+    const seasonRule = temporalContext
+        ? `Calendar context: ${temporalContext}. Match clothing, daylight, vegetation and surroundings to this date, season and time. Do not invent rain, snow or extreme weather from the season alone. If the described location has a different climate or the scene is indoors, follow the actual location and environment instead.`
+        : '';
+    const qualityRule = 'Create the image now as a casual phone snapshot taken moments ago for an immediate social post. Natural available light, slightly imperfect framing, no text, no watermark.';
+    const fullPrompt = `${scene}. ${identityRule} ${seasonRule} ${cameraRule} ${qualityRule}`;
+    const compactPrompt = `${scene}. ${identityRule} ${seasonRule} Generate a casual phone selfie if any person appears; otherwise generate a first-person phone snapshot. No text or watermark.`;
+    const attempts = [
+        { label: '인물 참조+전체 프롬프트', prompt: fullPrompt, references: usableReferences },
+        { label: '인물 참조+간단 프롬프트', prompt: compactPrompt, references: usableReferences },
+        ...(usableReferences.length
+            ? [{ label: '텍스트 외형 폴백', prompt: compactPrompt, references: [] }]
+            : []),
+    ];
+
+    let inline = null;
+    const failures = [];
+    for (const attempt of attempts) {
+        try {
+            const json = await requestGeneratedImage(settings, attempt.prompt, attempt.references);
+            inline = findGeneratedImage(json);
+            if (inline) break;
+            const summary = imageResponseSummary(json);
+            failures.push(`${attempt.label}: ${summary}`);
+            console.warn(`[chatlog] 이미지 응답에 데이터 없음 (${attempt.label}):`, summary);
+        } catch (e) {
+            failures.push(`${attempt.label}: ${e.message}`);
+            if (/(?:401|403|429|quota|billing|permission)/i.test(e.message)) throw e;
+        }
+    }
+    if (!inline) throw new Error(`이미지 데이터 없음 — ${failures.join(' / ')}`);
+
     const dir = path.join(ST_ROOT, 'public', 'user', 'images', 'chatlog');
     fs.mkdirSync(dir, { recursive: true });
-    const filename = `cut_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.png`;
+    const mime = inline.mime_type || inline.mimeType || 'image/png';
+    const ext = mime === 'image/jpeg' ? 'jpg' : mime === 'image/webp' ? 'webp' : 'png';
+    const filename = `cut_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.${ext}`;
     fs.writeFileSync(path.join(dir, filename), Buffer.from(inline.data, 'base64'));
 
     return `/user/images/chatlog/${filename}`;
@@ -543,6 +698,7 @@ module.exports = {
     googleUrl,
     callGoogle,
     readAvatar,
+    readPersonaAvatar,
     readRecentChat,
     getDebug,
     generateComment,
@@ -550,4 +706,5 @@ module.exports = {
     generateCharacterCut,
     generateImage,
     timeLabel,
+    seasonContext,
 };

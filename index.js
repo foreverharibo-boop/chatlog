@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.6.7';
+const CHATLOG_VERSION = '0.6.9';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -137,6 +137,7 @@ async function syncRoomCharacterCards() {
         const personaSnapshot = {
             name: persona.name,
             description: persona.description || '',
+            avatar: persona.file || null,
         };
         const patch = {};
         if (JSON.stringify(members) !== JSON.stringify(room.members || [])) patch.members = members;
@@ -182,6 +183,10 @@ const SETTINGS_HTML = `
         <select id="chatlog-profile" class="text_pole"></select>
         <div id="chatlog-profile-refresh" class="menu_button fa-solid fa-rotate" title="목록 새로고침"></div>
       </div>
+      <label class="checkbox_label chatlog-profile-follow">
+        <input id="chatlog-follow-profile" type="checkbox">
+        <span>실리태번에서 현재 선택한 연결 프로필 자동 사용</span>
+      </label>
       <small id="chatlog-profile-count"></small>
 
       <small>서버가 이 프로필의 모델·키를 직접 읽어서 씁니다. 브라우저에서 돌릴 때도 이 프로필로 조용히 요청하며, 활성 프로필은 바뀌지 않습니다.</small>
@@ -277,13 +282,22 @@ const SETTINGS_HTML = `
   </div>
 </div>`;
 
-function getProfiles() {
+function getConnectionManagerSettings() {
     const c = ctx();
-    // ST 버전에 따라 위치가 다름 — 순서대로 시도
-    return c?.extensionSettings?.connectionManager?.profiles
-        || c?.extensionSettings?.['connection-manager']?.profiles
-        || window.extension_settings?.connectionManager?.profiles
-        || [];
+    return c?.extensionSettings?.connectionManager
+        || c?.extensionSettings?.['connection-manager']
+        || window.extension_settings?.connectionManager
+        || {};
+}
+
+function getProfiles() {
+    const cm = getConnectionManagerSettings();
+    return Array.isArray(cm.profiles) ? cm.profiles : [];
+}
+
+function getActiveConnectionProfile() {
+    const cm = getConnectionManagerSettings();
+    return getProfiles().find(profile => String(profile.id) === String(cm.selectedProfile)) || null;
 }
 
 // 서버에 저장된 프로필 이름. 목록 로딩이 늦어도 이 값은 안 잃는다.
@@ -294,7 +308,7 @@ function refreshProfileSelect(selected) {
     const $sel = $('#chatlog-profile');
 
     if (selected !== undefined) savedProfileName = selected || '';
-    const keep = $sel.val() || savedProfileName;
+    const keep = selected !== undefined ? savedProfileName : ($sel.val() || savedProfileName);
 
     $sel.empty().append('<option value="">-- 선택 --</option>');
     profiles.forEach(p => $sel.append($('<option>').val(p.name).text(p.name)));
@@ -315,6 +329,7 @@ const FALLBACK_SETTINGS = {
     autoCleanup: false, cleanupAfterDays: 1, keepSaved: true,
     imageProvider: 'vertex', imageProjectId: '', imageRegion: 'global',
     textMode: 'express', textModel: 'gemini-2.5-flash',
+    followActiveProfile: true,
 };
 
 function toggleTextMode() {
@@ -322,6 +337,21 @@ function toggleTextMode() {
     $('#chatlog-textmodel-row').toggle(express);
     $('#chatlog-profile').closest('.chatlog-row').toggle(!express);
     $('#chatlog-profile-count').toggle(!express);
+    $('.chatlog-profile-follow').toggle(!express);
+}
+
+async function syncActiveConnectionProfile(profileName = null) {
+    if (!$('#chatlog-follow-profile').is(':checked')) return;
+    const active = profileName
+        ? getProfiles().find(profile => profile.name === profileName)
+        : getActiveConnectionProfile();
+    if (!active?.name) return;
+    refreshProfileSelect(active.name);
+    try {
+        await api('/settings', { profileName: active.name, followActiveProfile: true });
+    } catch (e) {
+        console.warn('[chatlog] 활성 연결 프로필 동기화 실패', e);
+    }
 }
 
 function toggleVertexFields() {
@@ -354,7 +384,18 @@ async function loadSettingsUi() {
         console.warn('[chatlog] 설정 불러오기 실패 — 기본값 사용', e);
         $('#chatlog-profile-count').text('서버 플러그인 응답 없음 (plugins/chatlog 확인)');
     }
-    refreshProfileSelect(s.profileName);
+    $('#chatlog-follow-profile').prop('checked', s.followActiveProfile !== false);
+    const activeProfile = getActiveConnectionProfile();
+    refreshProfileSelect(s.followActiveProfile !== false && activeProfile?.name
+        ? activeProfile.name
+        : s.profileName);
+    if (s.followActiveProfile !== false && activeProfile?.name && activeProfile.name !== s.profileName) {
+        try {
+            await api('/settings', { profileName: activeProfile.name, followActiveProfile: true });
+        } catch (e) {
+            console.warn('[chatlog] 활성 연결 프로필 초기 동기화 실패', e);
+        }
+    }
 
     if (s.imageApiKey) {
         $('#chatlog-image-key').val('').attr('placeholder', '저장돼 있음 — 바꿀 때만 입력');
@@ -411,6 +452,7 @@ async function saveSettingsUi() {
     const typedKey = $('#chatlog-image-key').val().trim();
     await api('/settings', {
         profileName: $('#chatlog-profile').val(),
+        followActiveProfile: $('#chatlog-follow-profile').is(':checked'),
         ...(typedKey ? { imageApiKey: typedKey } : {}),
         imageModel: readImageModel(),
         imageProvider: $('#chatlog-image-provider').val(),
@@ -1042,7 +1084,11 @@ async function createRoomFlow() {
         name,
         members,
         schedule: defaultSchedule,
-        persona: { name: persona.name, description: persona.description || '' },
+        persona: {
+            name: persona.name,
+            description: persona.description || '',
+            avatar: persona.file || null,
+        },
     });
     refresh();
 }
@@ -1453,8 +1499,15 @@ jQuery(async () => {
         toastr?.success?.('정리 완료');
         if ($overlay) refresh();
     });
-    // 확장 설정 드로어를 열 때마다 프로필 목록 갱신
-    $(document).on('click', '.chatlog-settings .inline-drawer-toggle', () => setTimeout(() => refreshProfileSelect(), 50));
+    // 확장 설정 드로어를 열 때마다 프로필 목록과 현재 선택값 갱신
+    $(document).on('click', '.chatlog-settings .inline-drawer-toggle', () => setTimeout(() => {
+        if ($('#chatlog-follow-profile').is(':checked')) syncActiveConnectionProfile();
+        else refreshProfileSelect();
+    }, 50));
+    $('#chatlog-follow-profile').on('change', function () {
+        $('#chatlog-profile').prop('disabled', this.checked);
+        if (this.checked) syncActiveConnectionProfile();
+    });
     $(document).on('input', '#chatlog-active-from, #chatlog-active-to, #chatlog-interval', updateCostHint);
     await loadSettingsUi();
 
@@ -1465,8 +1518,14 @@ jQuery(async () => {
     }
     if (c0.eventSource && c0.eventTypes?.SETTINGS_UPDATED) {
     }
+    if (c0.eventSource && c0.eventTypes?.CONNECTION_PROFILE_LOADED) {
+        c0.eventSource.on(c0.eventTypes.CONNECTION_PROFILE_LOADED, name => syncActiveConnectionProfile(name));
+    }
+    $('#chatlog-profile').prop('disabled', $('#chatlog-follow-profile').is(':checked'));
     [500, 1500, 4000].forEach(ms => setTimeout(() => {
-        if (getProfiles().length) refreshProfileSelect();
+        if (!getProfiles().length) return;
+        if ($('#chatlog-follow-profile').is(':checked')) syncActiveConnectionProfile();
+        else refreshProfileSelect();
     }, ms));
 
     registerSlashCommands();
