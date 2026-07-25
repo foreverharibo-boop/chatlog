@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.7.16';
+const CHATLOG_VERSION = '0.8.0';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -27,6 +27,24 @@ const showError = (message) => {
     if (window.toastr?.error) window.toastr.error(message);
     else window.alert(message);
 };
+
+function promoteToastContainer() {
+    const container = document.getElementById('toast-container');
+    if (!container) return;
+    if (container.parentElement !== document.documentElement) {
+        document.documentElement.appendChild(container);
+    }
+    container.classList.add('chatlog-toast-portal');
+    container.style.setProperty('z-index', '2147483647', 'important');
+}
+
+function installToastPortal() {
+    if (window.__chatlogToastPortalInstalled) return;
+    window.__chatlogToastPortalInstalled = true;
+    const observer = new MutationObserver(() => promoteToastContainer());
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    promoteToastContainer();
+}
 
 function cleanDisplayName(value) {
     let name = String(value || '').trim();
@@ -164,11 +182,13 @@ function relationshipContextForRoom(room) {
         return lines.join('\n');
     }
     for (const relation of graph.memberRelations || []) {
-        if (relation.confidence !== 'explicit' || relation.type === 'unknown') continue;
+        if (!['explicit', 'manual'].includes(relation.confidence) || relation.type === 'unknown') continue;
         lines.push(`- ${actor.name} ↔ ${relation.memberName}: ${relation.label}`);
+        if (relation.memberCallsPersona) lines.push(`  · ${relation.memberName}의 호칭: ${relation.memberCallsPersona}`);
+        if (relation.forbiddenTerms) lines.push(`  · 금지 호칭: ${relation.forbiddenTerms}`);
     }
     for (const relation of graph.characterRelations || []) {
-        if (relation.confidence !== 'explicit' || relation.type === 'unknown') continue;
+        if (!['explicit', 'manual'].includes(relation.confidence) || relation.type === 'unknown') continue;
         lines.push(`- ${relation.aName} ↔ ${relation.bName}: ${relation.label}`);
     }
     if (graph.summary) lines.push(`- 공통 요약: ${graph.summary}`);
@@ -1008,15 +1028,15 @@ function renderFeed() {
         .toLocaleDateString('ko-KR', { month: 'long', day: 'numeric', weekday: 'short' });
     const relationshipReady = room.relationshipGraph?.status === 'ready';
     const relationshipTitle = relationshipReady
-        ? `단톡 관계 새로고침${room.relationshipGraph.summary ? ` · ${room.relationshipGraph.summary}` : ''}`
-        : '단톡 관계 새로고침 필요';
+        ? `관계 직접 설정${room.relationshipGraph.summary ? ` · ${room.relationshipGraph.summary}` : ''}`
+        : '관계 설정 필요';
     const $top = $(`
       <div class="chatlog-slotbar">
         <span class="chatlog-nav prev fa-solid fa-chevron-left${di <= 0 ? ' off' : ''}"></span>
         <span class="chatlog-date">${dateLabel}</span>
         <span class="chatlog-nav next fa-solid fa-chevron-right${di >= days.length - 1 ? ' off' : ''}"></span>
         <span class="chatlog-slotbtn persona fa-solid fa-user-pen" title="표시 페르소나 변경"></span>
-        <span class="chatlog-slotbtn relationships fa-solid fa-arrows-rotate${relationshipReady ? '' : ' stale'}" title="${esc(relationshipTitle)}"></span>
+        <span class="chatlog-slotbtn relationships fa-solid fa-people-arrows${relationshipReady ? '' : ' stale'}" title="${esc(relationshipTitle)}"></span>
         <span class="chatlog-slotbtn upload fa-solid fa-camera" title="올리기"></span>
         <span class="chatlog-slotbtn daylog fa-solid fa-clapperboard" title="하루로그"></span>
       </div>`);
@@ -1035,7 +1055,7 @@ function renderFeed() {
         }
     });
     $top.find('.persona').on('click', () => changeRoomDisplayPersona(room));
-    $top.find('.relationships').on('click', event => refreshRoomRelationships(room, event.currentTarget));
+    $top.find('.relationships').on('click', () => editRoomRelationships(room));
     $top.find('.upload').on('click', () => uploadSheet(room));
     $top.find('.daylog').on('click', () => dayLogView(room, f.day));
     $b.append($top);
@@ -1105,6 +1125,26 @@ function renderFeed() {
     }
     f.motion = 'none';
     $b.append($stage);
+    const oldCards = new Map();
+    $body.find('.chatlog-cardwrap[data-post-id]').each((_, element) => {
+        const $element = $(element);
+        oldCards.set(String($element.attr('data-post-id')), $element);
+    });
+    $stage.find('.chatlog-cardwrap[data-post-id]').each((_, element) => {
+        const $newCard = $(element);
+        const $oldCard = oldCards.get(String($newCard.attr('data-post-id')));
+        if (!$oldCard) return;
+        if ($oldCard.attr('data-render-key') === $newCard.attr('data-render-key')) {
+            $newCard.replaceWith($oldCard.detach());
+            return;
+        }
+        const $oldBackground = $oldCard.find('.chatlog-sc-bg').first();
+        const $newBackground = $newCard.find('.chatlog-sc-bg').first();
+        if ($oldBackground.length && $newBackground.length
+            && $oldBackground.attr('src') === $newBackground.attr('src')) {
+            $newBackground.replaceWith($oldBackground.detach());
+        }
+    });
     $body.empty().append($b.children());
 }
 
@@ -1223,6 +1263,16 @@ function slotCard(room, p) {
         </div>
         ${comments ? `<div class="chatlog-comments">${comments}</div>` : ''}
       </div>`);
+    $card.attr({
+        'data-post-id': p.id,
+        'data-render-key': JSON.stringify({
+            image: p.image || '',
+            text: p.text || '',
+            saved: !!p.saved,
+            reactions: (p.reactions || []).map(r => [r.author, r.emoji, r.createdAt]),
+            comments: (p.comments || []).map(c => [c.id, c.author, c.text, !!c.read]),
+        }),
+    });
 
     $card.find('.smile').on('click', () => $card.find('.chatlog-picker').toggle());
     $card.find('.chatlog-pick').on('click', async function () {
@@ -1551,7 +1601,7 @@ async function changeRoomDisplayPersona(room) {
         status: 'stale',
         displayPersona: { name: snapshot.name, avatar: snapshot.avatar },
     };
-    toastr?.success?.(`${persona.name}(으)로 표시합니다. 관계 새로고침을 눌러 관계를 다시 정리해 주세요.`);
+    toastr?.success?.(`${persona.name}(으)로 표시합니다. 관계 설정 버튼에서 이 방의 관계를 다시 확인해 주세요.`);
     render();
 }
 
@@ -1588,22 +1638,154 @@ async function refreshRoomRelationships(room, button = null, options = {}) {
     }
 }
 
+const RELATION_OPTIONS = [
+    ['unknown', '미설정'],
+    ['spouse', '배우자'],
+    ['romantic', '연인'],
+    ['family', '가족'],
+    ['close_friend', '절친'],
+    ['friend', '친구'],
+    ['colleague', '동료'],
+    ['rival', '라이벌'],
+    ['acquaintance', '지인'],
+    ['ex', '전 연인'],
+    ['hostile', '적대 관계'],
+];
+
+async function editRoomRelationships(room, options = {}) {
+    if ($('.chatlog-relation-sheet').length) return;
+    const actor = personaForRoom(room);
+    const saved = new Map(
+        (room.relationshipGraph?.memberRelations || [])
+            .map(relation => [relation.memberAvatar, relation]),
+    );
+    const $sheet = $(`
+      <div class="chatlog-sheet chatlog-relation-sheet">
+        <div class="chatlog-sheet-inner chatlog-relation-editor">
+          <div class="chatlog-sheet-title">관계 직접 설정</div>
+          <div class="chatlog-relation-help">
+            화면의 <b>${esc(actor.name)}</b>와 각 캐릭터의 관계를 방 전용으로 고정해요.
+            저장한 관계는 AI 분석보다 우선하며 다른 페르소나의 관계가 섞이지 않아요.
+          </div>
+          <div class="chatlog-relation-list"></div>
+          <div class="chatlog-relation-tools">
+            <button type="button" class="menu_button chatlog-relation-ai">AI 제안으로 채우기</button>
+          </div>
+          <div class="chatlog-sheet-actions">
+            <div class="menu_button chatlog-cancel">나중에</div>
+            <div class="menu_button chatlog-relation-save">관계 저장</div>
+          </div>
+        </div>
+      </div>`);
+    document.documentElement.appendChild($sheet[0]);
+    const $list = $sheet.find('.chatlog-relation-list');
+
+    for (const member of room.members || []) {
+        const relation = saved.get(member.avatar) || {};
+        const $row = $(`
+          <section class="chatlog-relation-row" data-avatar="${esc(member.avatar)}">
+            <div class="chatlog-relation-person">
+              <img src="${avatarUrl(member.avatar)}" alt="">
+              <div><b>${esc(member.name)}</b><small>${esc(actor.name)}와의 관계</small></div>
+            </div>
+            <label>관계
+              <select class="chatlog-relation-type">
+                ${RELATION_OPTIONS.map(([value, label]) =>
+                    `<option value="${value}"${value === (relation.type || 'unknown') ? ' selected' : ''}>${label}</option>`).join('')}
+              </select>
+            </label>
+            <label>${esc(member.name)} → ${esc(actor.name)} 호칭
+              <input class="chatlog-member-call" maxlength="80" placeholder="예: 이름, 선배, 자기" value="${esc(relation.memberCallsPersona || '')}">
+            </label>
+            <label>${esc(actor.name)} → ${esc(member.name)} 호칭
+              <input class="chatlog-persona-call" maxlength="80" placeholder="예: 이름, 오빠, 여보" value="${esc(relation.personaCallsMember || '')}">
+            </label>
+            <label>금지 호칭·관계 표현
+              <input class="chatlog-forbidden" maxlength="160" placeholder="예: 꼬맹이, 여친, 자기" value="${esc(relation.forbiddenTerms || '')}">
+            </label>
+            <label>관계 메모
+              <textarea class="chatlog-relation-note" rows="2" maxlength="300" placeholder="다른 멤버들도 알고 있어야 할 사실만">${esc(relation.note || '')}</textarea>
+            </label>
+          </section>`);
+        $list.append($row);
+    }
+
+    const close = () => $sheet.remove();
+    $sheet.on('click', event => { if (event.target === $sheet[0]) close(); });
+    $sheet.find('.chatlog-cancel').on('click', close);
+    $sheet.find('.chatlog-relation-ai').on('click', async function () {
+        const $button = $(this);
+        if ($button.hasClass('busy')) return;
+        $button.addClass('busy').text('분석 중...');
+        const graph = await refreshRoomRelationships(room, null, { silent: false });
+        $button.removeClass('busy').text('AI 제안으로 채우기');
+        if (!graph) return;
+        close();
+        const freshRoom = state.rooms[room.id] || room;
+        editRoomRelationships(freshRoom, options);
+    });
+    $sheet.find('.chatlog-relation-save').on('click', async function () {
+        const $button = $(this);
+        if ($button.hasClass('busy')) return;
+        $button.addClass('busy').text('저장 중...');
+        const memberRelations = $sheet.find('.chatlog-relation-row').map((_, element) => {
+            const $row = $(element);
+            const member = room.members.find(item => item.avatar === $row.data('avatar'));
+            return {
+                memberAvatar: $row.data('avatar'),
+                memberName: member?.name || $row.data('avatar'),
+                type: $row.find('.chatlog-relation-type').val(),
+                memberCallsPersona: $row.find('.chatlog-member-call').val().trim(),
+                personaCallsMember: $row.find('.chatlog-persona-call').val().trim(),
+                forbiddenTerms: $row.find('.chatlog-forbidden').val().trim(),
+                note: $row.find('.chatlog-relation-note').val().trim(),
+            };
+        }).get();
+        try {
+            const result = await api('/room/relationships/manual', {
+                roomId: room.id,
+                memberRelations,
+            });
+            state.rooms[room.id] = result.room;
+            close();
+            toastr?.success?.('이 방의 관계를 직접 고정했어요.');
+            render();
+        } catch (error) {
+            toastr?.error?.('관계 저장 실패: ' + error.message);
+            $button.removeClass('busy').text('관계 저장');
+        }
+    });
+}
+
 async function createRoomFlow() {
     const c = ctx();
     const chars = c.characters || [];
     const name = await c.callGenericPopup?.('로그 이름', c.POPUP_TYPE?.INPUT, '우리 로그');
     if (!name) return;
 
-    const $list = $('<div class="chatlog-charpick"></div>');
+    const $picker = $(`
+      <div class="chatlog-charpick-wrap">
+        <input class="chatlog-char-search" type="search" placeholder="캐릭터 이름 검색">
+        <div class="chatlog-charpick"></div>
+      </div>`);
+    const $list = $picker.find('.chatlog-charpick');
     chars.forEach(ch => {
-        $list.append(`
-          <label class="chatlog-charrow">
+        const $row = $(`
+          <label class="chatlog-charrow" data-search="${esc(String(ch.name || '').toLowerCase())}">
             <input type="checkbox" value="${esc(ch.avatar)}">
             <img src="${avatarUrl(ch.avatar)}"><span>${esc(ch.name)}</span>
           </label>`);
+        $list.append($row);
+    });
+    $picker.find('.chatlog-char-search').on('input', function () {
+        const query = String(this.value || '').trim().toLowerCase();
+        $list.find('.chatlog-charrow').each((_, element) => {
+            const $row = $(element);
+            $row.toggle(!query || String($row.data('search') || '').includes(query));
+        });
     });
 
-    const ok = await c.callGenericPopup?.($list[0], c.POPUP_TYPE?.CONFIRM, '', { okButton: '다음' });
+    const ok = await c.callGenericPopup?.($picker[0], c.POPUP_TYPE?.CONFIRM, '', { okButton: '다음' });
     if (!ok) return;
 
     const picked = $list.find('input:checked').map((_, el) => el.value).get();
@@ -1631,9 +1813,9 @@ async function createRoomFlow() {
         memberPersonas,
     });
     state.rooms[room.id] = room;
-    toastr?.info?.('단톡을 만들었어요. 처음 한 번 관계를 분석합니다.');
-    await refreshRoomRelationships(room, null, { silent: true });
     await refresh();
+    toastr?.success?.('단톡을 만들었어요. 표시 페르소나와의 관계를 정해 주세요.');
+    await editRoomRelationships(state.rooms[room.id] || room, { initial: true });
 }
 
 async function markRead(roomId) {
@@ -1978,8 +2160,13 @@ function encodeAnimatedGif(frames, width, height, delayCentiseconds = 140) {
 
 /** 시간대마다 한 프레임, 같은 시간대 사진은 한 프레임 안에 나란히 배치한 실제 GIF */
 async function exportDayLogGif(groups, room, selectedDay, onProgress) {
-    const width = 480;
-    const height = 640;
+    const width = 640;
+    const visibleCard = $overlay?.find('.chatlog-scard').get(0);
+    const visibleRect = visibleCard?.getBoundingClientRect?.();
+    const visibleRatio = visibleRect?.width > 0 && visibleRect?.height > 0
+        ? visibleRect.width / visibleRect.height
+        : 16 / 10;
+    const height = Math.max(320, Math.round(width / visibleRatio));
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
@@ -2181,6 +2368,7 @@ window.cl = {
 
 // ── 진입 ──────────────────────────────────────────────────
 jQuery(async () => {
+    installToastPortal();
     $('#extensions_settings2').append(SETTINGS_HTML);
     const $settingsDrawer = $('.chatlog-settings .inline-drawer-content');
     $settingsDrawer.hide();

@@ -1,5 +1,5 @@
 /* ==========================================================
-   chatlog — 셋로그 스타일 (화이트 / 9:16 / 타임라인)
+   chatlog — 셋로그 스타일 (화이트 / 16:10 / 타임라인)
    오버레이는 <html>에 append → MovingUI transform 무시, 뷰포트 정중앙
    흐림·그림자 전면 제거
    ========================================================== */
@@ -34,7 +34,12 @@ body #toast-container,
 #toast-container.toast-top-right,
 #toast-container.toast-bottom-right {
     position: fixed !important;
-    z-index: 100100 !important;
+    z-index: 2147483647 !important;
+}
+html > #toast-container.chatlog-toast-portal {
+    z-index: 2147483647 !important;
+    isolation: isolate !important;
+    transform: translateZ(0) !important;
 }
 
 html > .chatlog-overlay *,
@@ -54,7 +59,7 @@ html > .chatlog-sheet * {
     transform: none !important;
 
     width: min(96vw, 430px);
-    height: min(94dvh, 900px);
+    height: min(94svh, 900px);
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -64,7 +69,6 @@ html > .chatlog-sheet * {
     border-radius: 24px;
     border: 1px solid #ececec;
     isolation: isolate;
-    contain: layout paint;
 
     font-family: -apple-system, "Pretendard", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
     letter-spacing: -0.02em;
@@ -258,7 +262,7 @@ html > .chatlog-sheet * {
     min-width: 0;
 }
 
-/* ── 게시물 카드: 9:16 ─────────────────────────────────── */
+/* ── 게시물 카드: 챗로그 공통 16:10 ───────────────────── */
 .chatlog-post { margin-bottom: 4px; }
 
 .chatlog-frame {
@@ -266,7 +270,7 @@ html > .chatlog-sheet * {
     border-radius: 20px;
     overflow: hidden;
     background: #f4f2ee;
-    aspect-ratio: 9 / 16;
+    aspect-ratio: 16 / 10;
     border: 1px solid #eeebe5;
 }
 
@@ -454,7 +458,7 @@ html > .chatlog-sheet * {
     position: relative !important;
     margin: 0 !important;
     width: min(94vw, 400px);
-    max-height: 88dvh;
+    max-height: 88svh;
     overflow-y: auto;
     background: #ffffff;
     border: 1px solid #ececec;
@@ -464,7 +468,6 @@ html > .chatlog-sheet * {
     font-family: -apple-system, "Pretendard", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
     letter-spacing: -0.02em;
     isolation: isolate;
-    contain: layout paint;
 }
 
 .chatlog-sheet-title {
@@ -475,8 +478,8 @@ html > .chatlog-sheet * {
 }
 
 .chatlog-preview {
-    aspect-ratio: 9 / 16;
-    max-height: 46dvh;
+    aspect-ratio: 16 / 10;
+    max-height: 46svh;
     margin: 0 auto;
     border-radius: 18px;
     background: #f4f2ee;
@@ -576,7 +579,7 @@ html > .chatlog-sheet * {
 }
 .chatlog-cell {
     position: relative;
-    aspect-ratio: 9 / 16;
+    aspect-ratio: 16 / 10;
     overflow: hidden;
     background: #f4f2ee;
 }
@@ -594,12 +597,84 @@ html > .chatlog-sheet * {
 .chatlog-export.disabled { opacity: 0.3; pointer-events: none; }
 
 /* ── 캐릭터 선택 ───────────────────────────────────────── */
+.chatlog-charpick-wrap { text-align: left; }
+.chatlog-char-search {
+    width: 100%;
+    margin-bottom: 10px;
+    padding: 10px 12px;
+    border-radius: 12px;
+}
 .chatlog-charpick { max-height: 50vh; overflow-y: auto; text-align: left; }
 .chatlog-charrow {
     display: flex; align-items: center; gap: 10px;
     padding: 7px 4px; cursor: pointer;
 }
 .chatlog-charrow img { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; }
+.chatlog-relation-editor {
+    width: min(94vw, 520px);
+    max-height: min(90svh, 860px);
+}
+.chatlog-relation-help {
+    margin: 2px 0 12px;
+    color: #77716a;
+    font-size: 0.78em;
+    line-height: 1.5;
+}
+.chatlog-relation-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow-y: auto;
+    padding-right: 3px;
+}
+.chatlog-relation-row {
+    display: grid;
+    gap: 8px;
+    padding: 12px;
+    border: 1px solid #e7e2dc;
+    border-radius: 16px;
+    background: #faf9f7;
+}
+.chatlog-relation-person {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.chatlog-relation-person img {
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    object-fit: cover;
+}
+.chatlog-relation-person div {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+.chatlog-relation-person small { color: #99928a; font-size: 0.7em; }
+.chatlog-relation-row label {
+    display: grid;
+    gap: 4px;
+    color: #625d57;
+    font-size: 0.76em;
+}
+.chatlog-relation-row input,
+.chatlog-relation-row select,
+.chatlog-relation-row textarea {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid #ddd7d0;
+    border-radius: 10px;
+    background: #fff;
+    color: #191919;
+    font: inherit;
+    resize: vertical;
+}
+.chatlog-relation-tools {
+    display: flex;
+    justify-content: center;
+    margin-top: 10px;
+}
 .chatlog-personapick { text-align: left; padding: 4px 0; }
 .chatlog-picktitle { text-align: center; font-size: 1.05em; font-weight: 800; margin-bottom: 4px; }
 .chatlog-pickhint { text-align: center; font-size: 0.78em; opacity: 0.58; margin-bottom: 14px; }
@@ -994,25 +1069,6 @@ html > .chatlog-sheet * {
     touch-action: pan-y;
     min-height: 240px;
 }
-.chatlog-stage.motion-next .chatlog-cardwrap {
-    animation: chatlog-slide-next 180ms ease-out both;
-}
-.chatlog-stage.motion-prev .chatlog-cardwrap {
-    animation: chatlog-slide-prev 180ms ease-out both;
-}
-.chatlog-stage.motion-jump .chatlog-cardwrap {
-    animation: none;
-}
-
-@keyframes chatlog-slide-next {
-    from { transform: translateX(20px); }
-    to { transform: translateX(0); }
-}
-@keyframes chatlog-slide-prev {
-    from { transform: translateX(-20px); }
-    to { transform: translateX(0); }
-}
-
 .chatlog-cardwrap { display: flex; flex-direction: column; }
 
 .chatlog-scard {

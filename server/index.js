@@ -94,7 +94,7 @@ function loadAll() {
         room.slotHistory ??= [];
         room.memberPersonas ??= {};
         room.relationshipGraph ??= {
-            version: 1,
+            version: 2,
             status: 'stale',
             generatedAt: null,
             displayPersona: room.persona
@@ -109,6 +109,9 @@ function loadAll() {
             || room.relationshipGraph.status === 'pending') {
             room.relationshipGraph.status = 'stale';
         }
+        room.relationshipGraph.version = 2;
+        room.relationshipGraph.memberRelations ??= [];
+        room.relationshipGraph.characterRelations ??= [];
         room.schedule ??= {};
         room.schedule.maxSilenceHours ??= 12;
     }
@@ -203,6 +206,23 @@ function statusPayload() {
 
 const uid = (p) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 const rand = (min, max) => min + Math.random() * (max - min);
+const COMMENT_INTENTS = ['detail', 'tease', 'question', 'opinion', 'practical', 'callback', 'minimal'];
+
+function shuffled(values) {
+    const copy = [...values];
+    for (let index = copy.length - 1; index > 0; index--) {
+        const target = Math.floor(Math.random() * (index + 1));
+        [copy[index], copy[target]] = [copy[target], copy[index]];
+    }
+    return copy;
+}
+
+function spreadTimes(startAt, count, windowMinutes = 48) {
+    if (count <= 0) return [];
+    const stepMs = Math.max(60 * 1000, windowMinutes * 60 * 1000 / count);
+    return Array.from({ length: count }, (_, index) =>
+        Math.round(startAt + index * stepMs + rand(60 * 1000, Math.max(90 * 1000, stepMs * 0.72))));
+}
 
 // ── 스케줄 계산 ───────────────────────────────────────────
 function computeNextSlot(room, from = Date.now()) {
@@ -270,8 +290,9 @@ function activeHoursBetween(from, to, schedule = {}) {
 function enqueueEngagement(room, post) {
     const minMs = Math.max(10 * 1000, settings.commentDelayMinMin * 30000);
     const maxMs = Math.max(minMs, settings.commentDelayMaxMin * 60000);
-    for (const member of room.members) {
-        if (member.avatar === post.author) continue;
+    const members = shuffled(room.members.filter(member => member.avatar !== post.author));
+    const intents = shuffled(COMMENT_INTENTS);
+    for (const [index, member] of members.entries()) {
         const commentWanted = post.author === 'user'
             || Math.random() * 100 < Math.max(0, Math.min(100, settings.characterCommentChance));
         db.jobs.push({
@@ -281,6 +302,7 @@ function enqueueEngagement(room, post) {
             postId: post.id,
             charId: member.avatar,
             commentWanted,
+            commentIntent: intents[index % intents.length],
             attempts: 0,
             runAt: Date.now() + rand(minMs, maxMs),
         });
@@ -314,6 +336,7 @@ async function runJob(job) {
         if (!member) return;
         const text = await ai.generateComment(settings, room, post, member, {
             replyToCommentId: job.replyToCommentId,
+            commentIntent: job.commentIntent,
         });
         post.comments.push({
             id: uid('c'),
@@ -352,6 +375,7 @@ async function runJob(job) {
         if (!member || member.avatar === post.author) return;
         const result = await ai.generateEngagement(settings, room, post, member, {
             commentWanted: job.commentWanted === true,
+            commentIntent: job.commentIntent,
         });
         post.reactions ??= [];
         const existing = post.reactions.findIndex(reaction => reaction.author === member.avatar);
@@ -381,7 +405,8 @@ async function runJob(job) {
     if (job.type === 'cut') {
         const member = findMember(room, job.charId);
         if (!member) return;
-        if (hasCharacterPostInSlot(room.id, member.avatar, job.slotAt)) {
+        const effectiveSlotAt = Date.now();
+        if (hasCharacterPostInSlot(room.id, member.avatar, effectiveSlotAt)) {
             return { status: 'duplicate-skipped' };
         }
         const previous = (db.posts[room.id] || [])
@@ -393,7 +418,7 @@ async function runJob(job) {
             room.schedule?.maxSilenceHours ?? 12,
         );
         const forcePost = !!job.forcePost
-            || activeHoursBetween(lastPostAt, job.slotAt, room.schedule) >= maxSilenceHours;
+            || activeHoursBetween(lastPostAt, effectiveSlotAt, room.schedule) >= maxSilenceHours;
         const recentPhotoModes = (db.posts[room.id] || [])
             .filter(post => post.author === member.avatar && post.photoMode)
             .sort((a, b) => (b.slotAt ?? b.createdAt) - (a.slotAt ?? a.createdAt))
@@ -403,22 +428,22 @@ async function runJob(job) {
             Math.floor(rand(0, 100)),
             recentPhotoModes,
         );
-        const result = await ai.generateCharacterCut(settings, room, member, job.slotAt, {
+        const result = await ai.generateCharacterCut(settings, room, member, effectiveSlotAt, {
             forcePost,
             randomRoll: Math.floor(rand(0, 100)),
-            activeHoursSinceLastPost: activeHoursBetween(lastPostAt, job.slotAt, room.schedule),
+            activeHoursSinceLastPost: activeHoursBetween(lastPostAt, effectiveSlotAt, room.schedule),
             maxSilenceHours,
             ...photoDecision,
         });
         if (result.skipped) return { status: 'skipped' };
-        if (hasCharacterPostInSlot(room.id, member.avatar, job.slotAt)) {
+        if (hasCharacterPostInSlot(room.id, member.avatar, effectiveSlotAt)) {
             return { status: 'duplicate-skipped' };
         }
         const { text, image, photoMode } = result;
         const post = {
             id: uid('post'), roomId: room.id, author: job.charId,
             authorName: member.name,
-            slotAt: job.slotAt, createdAt: Date.now(),
+            slotAt: effectiveSlotAt, createdAt: Date.now(),
             text, image, imageSource: 'generated', photoMode,
             read: false, comments: [], reactions: [],
         };
@@ -430,7 +455,7 @@ async function runJob(job) {
 
 function retryableJobError(error) {
     const message = String(error?.message || '');
-    if (/(?:400|401|403|invalid api|api 키|연결 프로필을 찾을 수 없음|프로젝트 ID)/i.test(message)) {
+    if (/(?:400|401|403|invalid api|api 키|연결 프로필을 찾을 수 없음|프로젝트 ID|화자 ID 검증 실패|참조 프사가 없어|이미지 데이터 없음|이미지를 만들지 못해)/i.test(message)) {
         return false;
     }
     return true;
@@ -528,7 +553,7 @@ function latestPostAtForMember(room, member) {
 
 function skipMissedSlots(room, now) {
     db.runtime.skippedMissedSlots += 1;
-    const overdueMembers = [];
+        const overdueMembers = [];
     if (isActiveAt(room, now)) {
         for (const member of room.members) {
             const maxSilenceHours = Math.max(
@@ -545,20 +570,23 @@ function skipMissedSlots(room, now) {
                 && job.charId === member.avatar);
             if (activeGap >= maxSilenceHours && !alreadyQueued) {
                 overdueMembers.push(member);
-                db.jobs.push({
-                    id: uid('job'),
-                    type: 'cut',
-                    roomId: room.id,
-                    charId: member.avatar,
-                    slotAt: now,
-                    runAt: now + rand(0, 2 * 60 * 1000),
-                    forcePost: true,
-                    attempts: 0,
-                    resumedAfterGap: true,
-                });
             }
         }
     }
+    const resumedTimes = spreadTimes(now, overdueMembers.length, Math.min(42, Math.max(12, overdueMembers.length * 9)));
+    overdueMembers.forEach((member, index) => {
+        db.jobs.push({
+            id: uid('job'),
+            type: 'cut',
+            roomId: room.id,
+            charId: member.avatar,
+            slotAt: now,
+            runAt: resumedTimes[index],
+            forcePost: true,
+            attempts: 0,
+            resumedAfterGap: true,
+        });
+    });
     if (overdueMembers.length) recordSlot(room, now);
     room.nextSlotAt = computeNextSlot(room, now);
     db.runtime.lastNoticeAt = now;
@@ -586,13 +614,17 @@ async function tick() {
 
             const slotAt = room.nextSlotAt;
             recordSlot(room, slotAt);
-            for (const member of room.members) {
-                if (hasCharacterPostInSlot(room.id, member.avatar, slotAt)
-                    || hasQueuedCharacterCut(room.id, member.avatar, slotAt)) continue;
+            const eligible = shuffled(room.members.filter(member =>
+                !hasCharacterPostInSlot(room.id, member.avatar, slotAt)
+                && !hasQueuedCharacterCut(room.id, member.avatar, slotAt)));
+            const intervalMinutes = Math.max(60, Number(room.schedule?.cutIntervalHours || 2) * 60);
+            const spreadMinutes = Math.min(55, Math.max(18, intervalMinutes * 0.55));
+            const runTimes = spreadTimes(slotAt, eligible.length, spreadMinutes);
+            for (const [index, member] of eligible.entries()) {
                 db.jobs.push({
                     id: uid('job'), type: 'cut', roomId: room.id, charId: member.avatar, slotAt,
                     attempts: 0,
-                    runAt: slotAt + rand(0, 10 * 60 * 1000), // 동시에 우르르 올리지 않게 분산
+                    runAt: runTimes[index],
                 });
             }
             room.nextSlotAt = computeNextSlot(room, slotAt);
@@ -657,8 +689,8 @@ async function init(router) {
             createdAt: Date.now(), paused: false,
             slotHistory: [],
             relationshipGraph: {
-                version: 1,
-                status: 'pending',
+                version: 2,
+                status: 'ready',
                 generatedAt: null,
                 displayPersona: persona
                     ? { name: persona.name || '유저', avatar: persona.avatar || null }
@@ -687,6 +719,7 @@ async function init(router) {
         const { roomId, ...patch } = req.body || {};
         const room = db.rooms[roomId];
         if (!room) return res.status(404).json({ error: 'room not found' });
+        const personaBefore = JSON.stringify(room.persona || null);
         const identityBefore = JSON.stringify({
             persona: room.persona || null,
             memberPersonas: room.memberPersonas || {},
@@ -719,10 +752,13 @@ async function init(router) {
             })),
         });
         if (identityBefore !== identityAfter) {
+            const personaChanged = personaBefore !== JSON.stringify(room.persona || null);
+            const hasManualRelations = (room.relationshipGraph?.memberRelations || [])
+                .some(item => item?.locked === true || item?.confidence === 'manual');
             room.relationshipGraph = {
                 ...(room.relationshipGraph || {}),
-                version: 1,
-                status: 'stale',
+                version: 2,
+                status: hasManualRelations && !personaChanged ? 'ready' : 'stale',
                 displayPersona: room.persona
                     ? { name: room.persona.name || '유저', avatar: room.persona.avatar || null }
                     : null,
@@ -732,6 +768,33 @@ async function init(router) {
         if (patch.schedule) room.nextSlotAt = computeNextSlot(room);
         saveDb();
         res.json(room);
+    });
+
+    router.post('/room/relationships/manual', (req, res) => {
+        const { roomId, memberRelations = [], characterRelations } = req.body || {};
+        const room = db.rooms[roomId];
+        if (!room) return res.status(404).json({ error: 'room not found' });
+        const previous = room.relationshipGraph || {};
+        room.relationshipGraph = ai.normalizeRelationshipGraph(room, {
+            memberRelations: memberRelations.map(item => ({
+                ...item,
+                confidence: 'manual',
+                locked: true,
+            })),
+            characterRelations: Array.isArray(characterRelations)
+                ? characterRelations.map(item => ({
+                    ...item,
+                    confidence: 'manual',
+                    locked: true,
+                }))
+                : previous.characterRelations || [],
+        });
+        room.relationshipGraph.version = 2;
+        room.relationshipGraph.source = 'manual';
+        room.relationshipGraph.status = 'ready';
+        room.relationshipGraph.generatedAt = Date.now();
+        saveDb();
+        res.json({ ok: true, room, relationshipGraph: room.relationshipGraph });
     });
 
     router.post('/room/relationships/refresh', async (req, res) => {
@@ -744,7 +807,7 @@ async function init(router) {
 
         room.relationshipGraph = {
             ...(room.relationshipGraph || {}),
-            version: 1,
+            version: 2,
             status: 'building',
             displayPersona: room.persona
                 ? { name: room.persona.name || '유저', avatar: room.persona.avatar || null }
@@ -760,7 +823,7 @@ async function init(router) {
         } catch (error) {
             room.relationshipGraph = {
                 ...(room.relationshipGraph || {}),
-                version: 1,
+                version: 2,
                 status: 'error',
                 generatedAt: null,
                 lastError: String(error?.message || error).slice(0, 800),
@@ -848,6 +911,7 @@ async function init(router) {
             charId: source.charId,
             replyToCommentId: source.replyToCommentId,
             commentWanted: source.commentWanted,
+            commentIntent: source.commentIntent,
             slotAt: source.slotAt,
             forcePost: source.forcePost,
             attempts,
@@ -875,8 +939,17 @@ async function init(router) {
     // 이미지 생성 테스트
     router.post('/test/image', async (req, res) => {
         try {
-            const p = await ai.generateImage(settings, req.body?.prompt
-                || 'a cozy desk with a warm lamp at night, seen from first person');
+            const p = await ai.generateImage(
+                settings,
+                req.body?.prompt || 'a cozy desk with a warm lamp at night, seen from first person',
+                [],
+                null,
+                null,
+                '',
+                '',
+                '',
+                'everyday',
+            );
             res.json({ ok: true, path: p });
         } catch (e) {
             res.status(500).json({ ok: false, error: e.message });
@@ -904,6 +977,7 @@ async function init(router) {
                 id: uid('job'), type: 'comment',
                 roomId, postId, charId: post.author,
                 replyToCommentId: userComment.id,
+                commentIntent: 'callback',
                 attempts: 0,
                 runAt: Date.now() + rand(minMs, maxMs),
             });

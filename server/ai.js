@@ -741,8 +741,15 @@ function normalizeRelationshipGraph(room, parsed) {
             memberAvatar: member.avatar,
             memberName: member.name,
             type,
-            label: relationTypeLabel(type),
-            confidence: found?.confidence === 'explicit' ? 'explicit' : 'unknown',
+            label: String(found?.label || relationTypeLabel(type)).trim().slice(0, 80),
+            confidence: found?.confidence === 'manual'
+                ? 'manual'
+                : found?.confidence === 'explicit' ? 'explicit' : 'unknown',
+            locked: found?.locked === true || found?.confidence === 'manual',
+            memberCallsPersona: String(found?.memberCallsPersona || '').trim().slice(0, 80),
+            personaCallsMember: String(found?.personaCallsMember || '').trim().slice(0, 80),
+            forbiddenTerms: String(found?.forbiddenTerms || '').trim().slice(0, 160),
+            note: String(found?.note || '').trim().slice(0, 300),
         };
     });
 
@@ -762,22 +769,29 @@ function normalizeRelationshipGraph(room, parsed) {
             bAvatar,
             bName: members.find(member => member.avatar === bAvatar)?.name || bAvatar,
             type,
-            label: relationTypeLabel(type),
-            confidence: item?.confidence === 'explicit' ? 'explicit' : 'unknown',
+            label: String(item?.label || relationTypeLabel(type)).trim().slice(0, 80),
+            confidence: item?.confidence === 'manual'
+                ? 'manual'
+                : item?.confidence === 'explicit' ? 'explicit' : 'unknown',
+            locked: item?.locked === true || item?.confidence === 'manual',
+            aCallsB: String(item?.aCallsB || '').trim().slice(0, 80),
+            bCallsA: String(item?.bCallsA || '').trim().slice(0, 80),
+            forbiddenTerms: String(item?.forbiddenTerms || '').trim().slice(0, 160),
+            note: String(item?.note || '').trim().slice(0, 300),
         });
     }
 
     const summaryParts = [
         ...memberRelations
-            .filter(item => item.confidence === 'explicit' && item.type !== 'unknown')
+            .filter(item => ['explicit', 'manual'].includes(item.confidence) && item.type !== 'unknown')
             .map(item => `${display.name}와 ${item.memberName}: ${item.label}`),
         ...characterRelations
-            .filter(item => item.confidence === 'explicit' && item.type !== 'unknown')
+            .filter(item => ['explicit', 'manual'].includes(item.confidence) && item.type !== 'unknown')
             .map(item => `${item.aName}와 ${item.bName}: ${item.label}`),
     ];
 
     return {
-        version: 1,
+        version: 2,
         status: 'ready',
         generatedAt: Date.now(),
         displayPersona: {
@@ -789,6 +803,39 @@ function normalizeRelationshipGraph(room, parsed) {
         summary: summaryParts.join(' · ').slice(0, 1000),
         lastError: null,
     };
+}
+
+function mergeRelationshipGraphs(room, previous, analyzed) {
+    const normalized = normalizeRelationshipGraph(room, analyzed);
+    const lockedMembers = new Map(
+        (previous?.memberRelations || [])
+            .filter(item => item?.locked === true || item?.confidence === 'manual')
+            .map(item => [item.memberAvatar, item]),
+    );
+    const pairKey = item => [item?.aAvatar, item?.bAvatar].sort().join('\u0000');
+    const lockedCharacters = new Map(
+        (previous?.characterRelations || [])
+            .filter(item => item?.locked === true || item?.confidence === 'manual')
+            .map(item => [pairKey(item), item]),
+    );
+    normalized.memberRelations = normalized.memberRelations.map(item => {
+        const locked = lockedMembers.get(item.memberAvatar);
+        return locked ? { ...item, ...locked, memberName: item.memberName } : item;
+    });
+    const mergedCharacters = new Map(
+        normalized.characterRelations.map(item => [pairKey(item), item]),
+    );
+    for (const [key, relation] of lockedCharacters) mergedCharacters.set(key, relation);
+    normalized.characterRelations = [...mergedCharacters.values()];
+    normalized.summary = [
+        ...normalized.memberRelations
+            .filter(item => ['explicit', 'manual'].includes(item.confidence) && item.type !== 'unknown')
+            .map(item => `${normalized.displayPersona.name}와 ${item.memberName}: ${item.label}`),
+        ...normalized.characterRelations
+            .filter(item => ['explicit', 'manual'].includes(item.confidence) && item.type !== 'unknown')
+            .map(item => `${item.aName}와 ${item.bName}: ${item.label}`),
+    ].join(' · ').slice(0, 1000);
+    return normalized;
 }
 
 /**
@@ -858,7 +905,7 @@ async function analyzeRoomRelationships(settings, room) {
     const raw = await callText(api, { system, user, json: true });
     const parsed = extractJson(raw);
     if (!parsed) throw new Error('단톡 관계 JSON 파싱 실패');
-    return normalizeRelationshipGraph(room, parsed);
+    return mergeRelationshipGraphs(room, room?.relationshipGraph, parsed);
 }
 
 function relationshipGraphBlock(settings, room) {
@@ -874,15 +921,74 @@ function relationshipGraphBlock(settings, room) {
         return lines.join('\n');
     }
     for (const relation of graph.memberRelations || []) {
-        if (relation.confidence !== 'explicit' || relation.type === 'unknown') continue;
-        lines.push(`- ${display.name} ↔ ${relation.memberName}: ${relation.label}`);
+        if (!['explicit', 'manual'].includes(relation.confidence) || relation.type === 'unknown') continue;
+        lines.push(`- [고정 관계 ID user↔${relation.memberAvatar}] ${display.name} ↔ ${relation.memberName}: ${relation.label}`);
+        if (relation.memberCallsPersona) {
+            lines.push(`  · ${relation.memberName}가 ${display.name}를 부를 때 허용된 호칭: ${relation.memberCallsPersona}`);
+        }
+        if (relation.personaCallsMember) {
+            lines.push(`  · ${display.name}가 ${relation.memberName}를 부를 때 허용된 호칭: ${relation.personaCallsMember}`);
+        }
+        if (relation.forbiddenTerms) lines.push(`  · 이 둘 사이 금지 호칭·관계 표현: ${relation.forbiddenTerms}`);
+        if (relation.note) lines.push(`  · 관계 메모: ${relation.note}`);
     }
     for (const relation of graph.characterRelations || []) {
-        if (relation.confidence !== 'explicit' || relation.type === 'unknown') continue;
-        lines.push(`- ${relation.aName} ↔ ${relation.bName}: ${relation.label}`);
+        if (!['explicit', 'manual'].includes(relation.confidence) || relation.type === 'unknown') continue;
+        lines.push(`- [고정 관계 ID ${relation.aAvatar}↔${relation.bAvatar}] ${relation.aName} ↔ ${relation.bName}: ${relation.label}`);
+        if (relation.aCallsB) lines.push(`  · ${relation.aName}가 ${relation.bName}를 부르는 호칭: ${relation.aCallsB}`);
+        if (relation.bCallsA) lines.push(`  · ${relation.bName}가 ${relation.aName}를 부르는 호칭: ${relation.bCallsA}`);
+        if (relation.forbiddenTerms) lines.push(`  · 이 둘 사이 금지 호칭·관계 표현: ${relation.forbiddenTerms}`);
+        if (relation.note) lines.push(`  · 관계 메모: ${relation.note}`);
     }
     if (graph.summary) lines.push(`- 공통 요약: ${graph.summary}`);
     lines.push('- 위에 적히지 않은 두 사람의 관계는 일반 지인 또는 불명으로 취급한다.');
+    return lines.join('\n');
+}
+
+function exactRelationFor(room, actorAvatar, targetAvatar) {
+    const graph = room?.relationshipGraph;
+    if (graph?.status !== 'ready') return null;
+    if (targetAvatar === 'user') {
+        return (graph.memberRelations || []).find(item => item.memberAvatar === actorAvatar) || null;
+    }
+    if (actorAvatar === 'user') {
+        return (graph.memberRelations || []).find(item => item.memberAvatar === targetAvatar) || null;
+    }
+    return (graph.characterRelations || []).find(item =>
+        (item.aAvatar === actorAvatar && item.bAvatar === targetAvatar)
+        || (item.aAvatar === targetAvatar && item.bAvatar === actorAvatar)) || null;
+}
+
+function scopedRelationshipRules(settings, room, member, post) {
+    const targetAvatar = post.author === 'user' ? 'user' : post.author;
+    const targetName = postAuthorName(settings, room, post, member);
+    const relation = exactRelationFor(room, member.avatar, targetAvatar);
+    const lines = [
+        '[이번 반응의 화자·대상 잠금]',
+        `- SPEAKER_ID=${member.avatar}`,
+        `- SPEAKER_NAME=${member.name}`,
+        `- TARGET_ID=${targetAvatar}`,
+        `- TARGET_NAME=${targetName}`,
+        `- 지금 말하는 사람은 오직 ${member.name}이다. 표시 페르소나나 게시물 작성자의 1인칭으로 말하지 않는다.`,
+        `- 댓글에서 ${member.name} 자신을 "${displayPersona(settings, room).name}"로 착각하지 않는다.`,
+    ];
+    if (!relation || relation.type === 'unknown') {
+        lines.push('- 이 화자와 대상 사이에 고정된 관계가 없다. 일반 단톡 지인으로 대하고 연애·배우자·가족·애칭을 만들지 않는다.');
+        return lines.join('\n');
+    }
+    lines.push(`- 이 둘의 고정 관계: ${relation.label || relationTypeLabel(relation.type)} (${relation.type})`);
+    let allowedCall = '';
+    if (targetAvatar === 'user') allowedCall = relation.memberCallsPersona || '';
+    else if (relation.aAvatar === member.avatar) allowedCall = relation.aCallsB || '';
+    else allowedCall = relation.bCallsA || '';
+    if (allowedCall) {
+        lines.push(`- ${member.name}가 ${targetName}를 부를 때 허용된 호칭: ${allowedCall}`);
+        lines.push('- 허용 목록 밖의 관계성 애칭은 쓰지 않는다.');
+    } else {
+        lines.push(`- ${targetName}의 이름 또는 캐릭터 카드에 명시된 중립 호칭만 쓴다. 새 애칭을 만들지 않는다.`);
+    }
+    if (relation.forbiddenTerms) lines.push(`- 반드시 피할 호칭·표현: ${relation.forbiddenTerms}`);
+    if (relation.note) lines.push(`- 관계 메모: ${relation.note}`);
     return lines.join('\n');
 }
 
@@ -985,6 +1091,31 @@ function postPhotoLabel(post) {
     return '(사진 첨부됨 — 사진만 보고 인물 관계를 추측하지 말 것)';
 }
 
+const COMMENT_INTENTS = {
+    detail: '사진이나 글의 구체적인 사물·행동 하나만 짚어서 반응한다.',
+    tease: '캐릭터다운 가벼운 장난이나 빈정거림으로 반응하되 관계를 과장하지 않는다.',
+    question: '사진이나 글에서 자연스럽게 생기는 짧은 질문 하나를 한다.',
+    opinion: '캐릭터 성격이 드러나는 짧은 의견이나 평가를 남긴다.',
+    practical: '현실적이고 실용적인 한마디를 한다. 잔소리형이면 캐릭터답게 짧게 한다.',
+    callback: '캐릭터 카드나 실제로 제공된 최근 대화에 있는 구체적 습관을 짧게 연결한다. 없는 사건은 만들지 않는다.',
+    minimal: '말수가 적은 사람처럼 아주 짧고 특징적인 한마디만 남긴다.',
+};
+
+function commentIntentRules(intent, existingComments = []) {
+    const selected = COMMENT_INTENTS[intent] || COMMENT_INTENTS.detail;
+    const existing = existingComments
+        .map(item => String(item?.text || '').trim())
+        .filter(Boolean)
+        .slice(-8);
+    return [
+        '[이번 댓글의 표현 방향]',
+        `- ${selected}`,
+        '- 특별히 시간 자체가 주제인 게시물이 아니면 "이 시간에", "이 새벽에", "이 저녁에", "아직 안 자", "얼른 자" 같은 시간·수면 상투어를 쓰지 않는다.',
+        '- 다른 댓글의 문장 구조, 첫 단어, 질문 방식을 따라 하지 않는다.',
+        existing.length ? `- 이미 사용된 댓글과 다른 관점으로 쓴다: ${existing.join(' / ')}` : '',
+    ].filter(Boolean).join('\n');
+}
+
 // ── 댓글 생성 ─────────────────────────────────────────────
 async function generateComment(settings, room, post, member, options = {}) {
     const api = resolveTextApi(settings);
@@ -1017,6 +1148,8 @@ async function generateComment(settings, room, post, member, options = {}) {
         charBlock(member),
         characterRelation ? `\n${characterRelation}` : '',
         `\n${roomRelations}`,
+        `\n${scopedRelationshipRules(settings, room, member, post)}`,
+        `\n${commentIntentRules(options.commentIntent, post.comments || [])}`,
         !isOtherCharacterPost && actorPersona.description
             ? `\n[현재 단톡에서 실제로 행동한 표시 페르소나]\n이름: ${personaName}\n설명: ${actorPersona.description}`
             : '',
@@ -1032,7 +1165,7 @@ async function generateComment(settings, room, post, member, options = {}) {
         '- 나레이션, 행동 묘사(*...*), 따옴표 금지. 댓글 텍스트만 출력한다.',
         '- 이름표나 접두사를 붙이지 마라.',
         recent ? '- 최근 대화의 분위기와 호칭은 연결된 유저 페르소나에게만 유지하라.' : '',
-        `- 현재 댓글 작성 시각은 ${timeLabel(Date.now())}, ${nowTemporal.daypartKo}이다. 아침·낮·저녁·밤 표현을 현재 시각과 맞춘다.`,
+        `- 현재 댓글 작성 시각은 ${timeLabel(Date.now())}, ${nowTemporal.daypartKo}이다. 시간 표현이 꼭 필요할 때만 현재 시각과 맞춘다.`,
         isOtherCharacterPost
             ? '- 다른 캐릭터에게는 연결 페르소나의 애칭·연애 관계·질투·소유욕을 절대 적용하지 않는다.'
             : '',
@@ -1087,6 +1220,31 @@ function cleanGeneratedComment(raw) {
         .trim();
 }
 
+function commentBigrams(value) {
+    const normalized = String(value || '')
+        .toLowerCase()
+        .replace(/(?:이\s*시간에|이\s*새벽에|이\s*저녁에|아직\s*안\s*자|얼른\s*자)/g, '')
+        .replace(/[^\p{L}\p{N}]/gu, '');
+    const result = new Set();
+    for (let index = 0; index < normalized.length - 1; index++) {
+        result.add(normalized.slice(index, index + 2));
+    }
+    return result;
+}
+
+function commentSimilarity(a, b) {
+    const left = commentBigrams(a);
+    const right = commentBigrams(b);
+    if (!left.size || !right.size) return 0;
+    let intersection = 0;
+    for (const item of left) if (right.has(item)) intersection++;
+    return intersection / Math.max(left.size, right.size);
+}
+
+function repeatsExistingComment(comment, comments = []) {
+    return comments.some(item => commentSimilarity(comment, item?.text) >= 0.62);
+}
+
 async function generateReaction(settings, room, post, member) {
     const api = resolveTextApi(settings);
     if (!api) throw new Error('연결 프로필을 찾을 수 없음');
@@ -1106,6 +1264,7 @@ async function generateReaction(settings, room, post, member) {
         charBlock(member),
         characterRelation ? `\n${characterRelation}` : '',
         `\n${relationshipGraphBlock(settings, room)}`,
+        `\n${scopedRelationshipRules(settings, room, member, post)}`,
         recent ? `\n[최근 대화 분위기]\n${recent}` : '',
         isOtherCharacterPost
             ? '\n연결된 유저 페르소나와의 관계·애정·질투·소유욕을 이 게시물 작성자에게 옮기지 않는다.'
@@ -1157,6 +1316,8 @@ async function generateEngagement(settings, room, post, member, options = {}) {
         charBlock(member),
         characterRelation ? `\n${characterRelation}` : '',
         `\n${relationshipGraphBlock(settings, room)}`,
+        `\n${scopedRelationshipRules(settings, room, member, post)}`,
+        commentWanted ? `\n${commentIntentRules(options.commentIntent, post.comments || [])}` : '',
         !isOtherCharacterPost && actorPersona.description
             ? `\n[현재 단톡에서 실제로 행동한 표시 페르소나]\n이름: ${actorPersona.name}\n설명: ${actorPersona.description}`
             : '',
@@ -1164,7 +1325,7 @@ async function generateEngagement(settings, room, post, member, options = {}) {
         '',
         `"${authorName}"의 챗로그 게시물에 반응한다.`,
         'JSON만 출력한다. 마크다운 코드펜스 금지.',
-        '{"comment":"댓글 또는 빈 문자열","emoji":"허용된 이모지 하나"}',
+        `{"speakerId":${JSON.stringify(member.avatar)},"targetId":${JSON.stringify(post.author === 'user' ? 'user' : post.author)},"comment":"댓글 또는 빈 문자열","emoji":"허용된 이모지 하나"}`,
         `emoji는 반드시 다음 중 하나다: ${REACTION_EMOJIS.join(' ')}`,
         commentWanted
             ? 'comment는 반드시 작성한다. 1~2문장, 40자 내외의 자연스러운 SNS 댓글로 쓴다.'
@@ -1180,7 +1341,7 @@ async function generateEngagement(settings, room, post, member, options = {}) {
             : '',
         '사진이 있으면 사진 속 구체적인 것 하나를 짚을 수 있다.',
         '사진에 함께 나온 사람을 근거 없이 여친·남친·연인·파트너라고 추측하지 않는다.',
-        `현재 댓글 작성 시각은 ${timeLabel(Date.now())}, ${nowTemporal.daypartKo}이다. 시간대 표현을 이에 맞춘다.`,
+        `현재 댓글 작성 시각은 ${timeLabel(Date.now())}, ${nowTemporal.daypartKo}이다. 시간 표현이 꼭 필요할 때만 현재 시각과 맞춘다.`,
         '나레이션, 행동 묘사, 따옴표, 이름표를 붙이지 마라.',
     ].filter(Boolean).join('\n');
     const user = [
@@ -1192,13 +1353,14 @@ async function generateEngagement(settings, room, post, member, options = {}) {
         '지정한 JSON 형식으로만 답하라.',
     ].join('\n');
 
-    const raw = await callText(api, {
+    const request = {
         system,
         user,
         image: readImageAsBase64(post.image),
         json: true,
-    });
-    const parsed = extractJson(raw);
+    };
+    const raw = await callText(api, request);
+    let parsed = extractJson(raw);
     if (!parsed) {
         const detail = raw && !String(raw).includes('}')
             ? '응답이 중간에 잘림'
@@ -1207,9 +1369,33 @@ async function generateEngagement(settings, room, post, member, options = {}) {
                 : '빈 응답';
         throw new Error(`댓글·반응 JSON 파싱 실패 (${detail})`);
     }
+    const expectedTarget = post.author === 'user' ? 'user' : post.author;
+    if (String(parsed.speakerId || '') !== String(member.avatar)
+        || String(parsed.targetId || '') !== String(expectedTarget)) {
+        throw new Error('댓글·반응 화자 ID 검증 실패');
+    }
     const emoji = REACTION_EMOJIS.find(item => String(parsed.emoji).includes(item)) || '👍';
+    let comment = commentWanted ? cleanGeneratedComment(parsed.comment) : '';
+    if (commentWanted && comment && repeatsExistingComment(comment, post.comments || [])) {
+        try {
+            const retryRaw = await callText(api, {
+                ...request,
+                user: `${user}\n\n첫 후보 댓글은 기존 댓글과 너무 비슷해 폐기됐다. 문장 시작·관점·질문 방식을 완전히 바꾼 JSON을 한 번만 다시 출력하라.`,
+            });
+            const retryParsed = extractJson(retryRaw);
+            if (String(retryParsed?.speakerId || '') === String(member.avatar)
+                && String(retryParsed?.targetId || '') === String(expectedTarget)) {
+                const retryComment = cleanGeneratedComment(retryParsed.comment);
+                comment = repeatsExistingComment(retryComment, post.comments || []) ? '' : retryComment;
+            } else {
+                comment = '';
+            }
+        } catch {
+            comment = '';
+        }
+    }
     return {
-        comment: commentWanted ? cleanGeneratedComment(parsed.comment) : '',
+        comment,
         emoji,
     };
 }
@@ -1348,10 +1534,14 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
                     image: readAvatar(settings, member.avatar),
                 }];
             if (!everydayPhoto && (parsed.personaVisible === true || parsed.personaVisible === 'true')) {
+                const personaReference = readPersonaAvatar(settings, persona.avatar);
+                if (!personaReference?.data) {
+                    throw new Error('함께 나온 페르소나의 참조 프사가 없어 인물 사진 생성을 건너뜀');
+                }
                 references.push({
                     role: 'user persona',
                     name: personaName,
-                    image: readPersonaAvatar(settings, persona.avatar),
+                    image: personaReference,
                 });
             }
             image = await generateImage(
@@ -1459,6 +1649,10 @@ async function generateImage(
     const usableReferences = normalizeReferences(references);
     const posterName = member?.name || 'the posting character';
     const everydayPhoto = photoMode === 'everyday';
+    if (!everydayPhoto
+        && !usableReferences.some(reference => reference.role === 'posting character')) {
+        throw new Error('게시 캐릭터 참조 프사가 없어 인물 사진 생성을 건너뜀');
+    }
     const visible = String(visualIdentity || '').trim().slice(0, 500);
     const personaVisible = String(personaVisualIdentity || '').trim().slice(0, 500);
     const identityRule = everydayPhoto
@@ -1466,7 +1660,8 @@ async function generateImage(
         : [
             `The person posting this photo is ${posterName}.`,
             visible ? `Visible identity of ${posterName}: ${visible}.` : '',
-            'Preserve the posting character’s gender, age, face, hair and build.',
+            'The first reference image labeled "posting character" is the mandatory identity anchor.',
+            'Preserve the exact same person: gender presentation, approximate age, facial structure, eyes, nose, mouth, hair, skin tone and build. Do not substitute a lookalike or a different person.',
             persona?.name
                 ? `${persona.name} is a separate person from the posting character; never merge their bodies, conditions or actions.`
                 : '',
@@ -1489,9 +1684,6 @@ async function generateImage(
     const attempts = [
         { label: `${attemptLabel}+전체 프롬프트`, prompt: fullPrompt, references: usableReferences },
         { label: `${attemptLabel}+간단 프롬프트`, prompt: compactPrompt, references: usableReferences },
-        ...(usableReferences.length
-            ? [{ label: '텍스트 외형 폴백', prompt: compactPrompt, references: [] }]
-            : []),
     ];
 
     let inline = null;
@@ -1552,6 +1744,7 @@ module.exports = {
     samePersona,
     postAuthorName,
     normalizeRelationshipGraph,
+    mergeRelationshipGraphs,
     relationshipGraphBlock,
     analyzeRoomRelationships,
 };
