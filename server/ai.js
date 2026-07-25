@@ -155,12 +155,23 @@ async function callGoogle(cfg, body) {
 }
 
 // ── 프로바이더별 호출 ─────────────────────────────────────
+const lastDebug = [];
+function pushDebug(entry) {
+    lastDebug.push({ time: new Date().toLocaleTimeString('ko-KR'), ...entry });
+    if (lastDebug.length > 10) lastDebug.shift();
+}
+function getDebug() { return lastDebug; }
+
 async function callGemini(api, { system, user, image, json: wantJson }) {
     const parts = [{ text: user }];
     if (image) parts.push({ inline_data: { mime_type: image.mime, data: image.data } });
 
-    const generationConfig = { temperature: 1.0, maxOutputTokens: 400 };
+    const generationConfig = { temperature: 1.0, maxOutputTokens: 2048 };
     if (wantJson) generationConfig.response_mime_type = 'application/json';
+    // gemini-2.5 계열은 thinking이 기본 ON — 출력 토큰을 생각에 다 쓰고 빈 답을 주는 원인.
+    if (/2\.5/.test(api.model || '')) {
+        generationConfig.thinkingConfig = { thinkingBudget: 0 };
+    }
 
     const json = await callGoogle(
         { provider: api.provider, model: api.model, apiKey: api.apiKey, projectId: api.projectId, region: api.region },
@@ -390,4 +401,4 @@ async function generateImage(settings, scene, reference = null) {
     return `/user/images/chatlog/${filename}`;
 }
 
-module.exports = { resolveTextApi, googleUrl, callGoogle, readAvatar, readRecentChat, generateComment, generateCharacterCut, generateImage, timeLabel };
+module.exports = { resolveTextApi, googleUrl, callGoogle, readAvatar, readRecentChat, getDebug, generateComment, generateCharacterCut, generateImage, timeLabel };

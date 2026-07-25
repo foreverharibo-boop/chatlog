@@ -307,6 +307,9 @@ async function init(router) {
         res.json({ ok: true });
     });
 
+    // 최근 AI 응답 원문 (디버그)
+    router.get('/debug', (req, res) => res.json(ai.getDebug()));
+
     // 핫 리로드 — ai.js 와 settings.json 을 다시 읽는다 (서버 재시작 불필요)
     router.post('/reload', (req, res) => {
         try {

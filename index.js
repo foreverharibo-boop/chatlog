@@ -967,6 +967,7 @@ window.cl = {
     reload: () => api('/reload', {}),
     jobs: () => api('/jobs'),
     cleanup: () => api('/cleanup', { force: true }),
+    debug: () => api('/debug'),
     help: () => console.table({
         'cl.rooms()': '방 목록 + 다음 슬롯',
         "cl.run('cut'|'comments'|'all')": '지금 강제 생성',
@@ -977,6 +978,7 @@ window.cl = {
         'cl.reload()': 'ai.js 핫 리로드',
         'cl.jobs()': '대기 작업',
         'cl.cleanup()': '지난 기록 즉시 정리',
+        'cl.debug()': '최근 AI 응답 원문 10건 (파싱 문제 확인용)',
     }),
 };
 
