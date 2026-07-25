@@ -5,6 +5,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const ST_ROOT = path.resolve(__dirname, '..', '..');
 
@@ -12,22 +13,36 @@ const loadJson = (p, fb) => {
     try { return JSON.parse(fs.readFileSync(p, 'utf-8')); } catch { return fb; }
 };
 
+function secretValue(secrets, key, secretId = '', exactId = false) {
+    const saved = secrets?.[key];
+    if (Array.isArray(saved)) {
+        const byId = secretId
+            ? saved.find(item => String(item?.id) === String(secretId))
+            : null;
+        if (exactId) return byId?.value || '';
+        const selected = byId
+            || saved.find(item => item?.active)
+            || saved[0];
+        return selected?.value || '';
+    }
+    return typeof saved === 'string' ? saved : '';
+}
+
+function parseServiceAccount(value) {
+    if (!value) return null;
+    if (typeof value === 'object') return value;
+    try {
+        const parsed = JSON.parse(String(value));
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
 // ── 연결 프로필 해석 ──────────────────────────────────────
 function resolveTextApi(settings) {
-    // Express 모드 — 이미지와 동일한 키/프로젝트로 텍스트도 호출한다.
-    // 정식 Vertex 프로필은 서비스 계정 OAuth가 필요해서 API 키로는 401이 난다.
-    if (settings.textMode === 'express') {
-        if (!settings.imageApiKey) return null;
-        return {
-            name: 'express',
-            source: 'vertexai',
-            model: settings.textModel || 'gemini-2.5-flash',
-            apiKey: settings.imageApiKey,
-            provider: 'vertex',
-            projectId: settings.imageProjectId || '',
-            region: settings.imageRegion || 'global',
-        };
-    }
+    // 텍스트는 반드시 ST 연결 프로필에서 해석한다.
+    // 이미지 전용 Express 키는 이 함수에서 절대 읽지 않는다.
 
     const userDir = path.join(ST_ROOT, 'data', settings.userHandle || 'default-user');
     const stSettings = loadJson(path.join(userDir, 'settings.json'), {});
@@ -38,15 +53,60 @@ function resolveTextApi(settings) {
     if (!profile) return null;
 
     const source = profile['api-source'] || profile.api || 'openai';
+    const secretId = profile['secret-id'] || profile.secretId || '';
+    const oaiSettings = stSettings?.oai_settings || stSettings?.openai_settings || {};
+
+    if (source === 'vertexai') {
+        const exactServiceAccount = parseServiceAccount(secretValue(
+            secrets,
+            'vertexai_service_account_json',
+            secretId,
+            true,
+        ));
+        const exactExpressKey = secretValue(secrets, 'api_key_vertexai', secretId, true);
+        const serviceAccount = exactServiceAccount || parseServiceAccount(secretValue(
+            secrets,
+            'vertexai_service_account_json',
+        ));
+        const expressKey = exactExpressKey || secretValue(secrets, 'api_key_vertexai');
+        const preferredMode = profile.vertexai_auth_mode
+            || profile['auth-mode']
+            || oaiSettings.vertexai_auth_mode
+            || (serviceAccount ? 'full' : 'express');
+        const authMode = exactServiceAccount
+            ? 'full'
+            : exactExpressKey
+                ? 'express'
+                : preferredMode === 'full' || (serviceAccount && !expressKey)
+                    ? 'full'
+                    : 'express';
+        return {
+            name: profile.name,
+            source: 'vertexai',
+            model: profile.model,
+            authMode,
+            serviceAccount,
+            apiKey: authMode === 'express' ? expressKey : '',
+            projectId: serviceAccount?.project_id
+                || profile.vertexai_project
+                || profile['project-id']
+                || oaiSettings.vertexai_express_project_id
+                || '',
+            region: profile.vertexai_region
+                || profile['api-url']
+                || oaiSettings.vertexai_region
+                || 'global',
+            secretId,
+        };
+    }
+
     return {
         name: profile.name,
         source,
         model: profile.model,
-        apiKey: secrets[`api_key_${source}`] || secrets[`api_key_vertexai`] || '',
-        customUrl: profile['custom-url'] || profile.reverse_proxy || '',
-        provider: source === 'vertexai' ? 'vertex' : 'other',
-        projectId: profile.vertexai_project || settings.imageProjectId || '',
-        region: profile.vertexai_region || settings.imageRegion || 'global',
+        apiKey: secretValue(secrets, `api_key_${source}`, secretId),
+        customUrl: profile['api-url'] || profile['custom-url'] || profile.reverse_proxy || '',
+        secretId,
     };
 }
 
@@ -219,14 +279,23 @@ function readImageAsBase64(webPath) {
     }
 }
 
-// ── Google 엔드포인트 (Vertex Express 전용) ──────────────
-function googleUrl({ model, apiKey }) {
-    // Express Mode는 projects/locations가 없는 전역 경로와 ?key= 인증을 쓴다.
-    return `https://aiplatform.googleapis.com/v1/publishers/google/models/${model}:generateContent`
+// ── Vertex AI 인증·호출 ───────────────────────────────────
+function googleUrl({
+    model,
+    apiKey,
+    projectId,
+    region = 'global',
+}) {
+    if (!projectId) throw new Error('Vertex Express 프로젝트 ID가 비어 있습니다');
+    const location = region || 'global';
+    return `https://aiplatform.googleapis.com/v1/projects/${encodeURIComponent(projectId)}`
+        + `/locations/${encodeURIComponent(location)}/publishers/google/models/`
+        + `${encodeURIComponent(model)}:generateContent`
         + `?key=${encodeURIComponent(apiKey)}`;
 }
 
 async function callGoogle(cfg, body) {
+    if (!cfg?.apiKey) throw new Error('Vertex Express API 키가 비어 있습니다');
     const res = await fetch(googleUrl(cfg), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -234,8 +303,95 @@ async function callGoogle(cfg, body) {
     });
     if (!res.ok) {
         const detail = await res.text();
-        console.error('[chatlog] Vertex Express API 오류', cfg.model, res.status, detail);
-        throw new Error(`vertex ${res.status} (${cfg.model}): ${detail.slice(0, 600)}`);
+        console.error('[chatlog] Vertex Express 오류', cfg.model, res.status, detail);
+        throw new Error(`vertex-express ${res.status} (${cfg.model}): ${detail.slice(0, 600)}`);
+    }
+    return res.json();
+}
+
+const vertexTokenCache = new Map();
+
+const toBase64Url = value => Buffer.from(value)
+    .toString('base64')
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_');
+
+async function getVertexAccessToken(serviceAccount) {
+    if (!serviceAccount?.client_email || !serviceAccount?.private_key) {
+        throw new Error('연결 프로필의 Vertex 서비스 계정 JSON을 찾을 수 없음');
+    }
+
+    const cacheKey = `${serviceAccount.client_email}:${serviceAccount.private_key_id || ''}`;
+    const cached = vertexTokenCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now() + 60_000) return cached.token;
+
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const tokenUri = serviceAccount.token_uri || 'https://oauth2.googleapis.com/token';
+    const header = toBase64Url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
+    const claim = toBase64Url(JSON.stringify({
+        iss: serviceAccount.client_email,
+        scope: 'https://www.googleapis.com/auth/cloud-platform',
+        aud: tokenUri,
+        iat: issuedAt,
+        exp: issuedAt + 3600,
+    }));
+    const unsigned = `${header}.${claim}`;
+    const signature = crypto.sign('RSA-SHA256', Buffer.from(unsigned), serviceAccount.private_key);
+    const assertion = `${unsigned}.${toBase64Url(signature)}`;
+
+    const res = await fetch(tokenUri, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+            grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+            assertion,
+        }),
+    });
+    if (!res.ok) {
+        throw new Error(`vertex OAuth ${res.status}: ${(await res.text()).slice(0, 600)}`);
+    }
+    const json = await res.json();
+    if (!json.access_token) throw new Error('Vertex OAuth 응답에 access_token이 없음');
+    vertexTokenCache.set(cacheKey, {
+        token: json.access_token,
+        expiresAt: Date.now() + Number(json.expires_in || 3600) * 1000,
+    });
+    return json.access_token;
+}
+
+function vertexProfileUrl({ projectId, region = 'global', model }) {
+    if (!projectId) throw new Error('연결 프로필의 Vertex 프로젝트 ID를 찾을 수 없음');
+    const location = region || 'global';
+    const host = location === 'global'
+        ? 'aiplatform.googleapis.com'
+        : `${location}-aiplatform.googleapis.com`;
+    return `https://${host}/v1/projects/${encodeURIComponent(projectId)}`
+        + `/locations/${encodeURIComponent(location)}/publishers/google/models/`
+        + `${encodeURIComponent(model)}:generateContent`;
+}
+
+async function callVertexProfile(api, body) {
+    if (api.authMode === 'express') {
+        return callGoogle({
+            model: api.model,
+            apiKey: api.apiKey,
+            projectId: api.projectId,
+            region: api.region,
+        }, body);
+    }
+    const accessToken = await getVertexAccessToken(api.serviceAccount);
+    const res = await fetch(vertexProfileUrl(api), {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+        const detail = await res.text();
+        throw new Error(`vertex-profile ${res.status} (${api.model}): ${detail.slice(0, 600)}`);
     }
     return res.json();
 }
@@ -259,14 +415,11 @@ async function callGemini(api, { system, user, image, json: wantJson }) {
         generationConfig.thinkingConfig = { thinkingBudget: 0 };
     }
 
-    const json = await callGoogle(
-        { provider: api.provider, model: api.model, apiKey: api.apiKey, projectId: api.projectId, region: api.region },
-        {
-            system_instruction: { parts: [{ text: system }] },
-            contents: [{ role: 'user', parts }],
-            generationConfig,
-        },
-    );
+    const json = await callVertexProfile(api, {
+        system_instruction: { parts: [{ text: system }] },
+        contents: [{ role: 'user', parts }],
+        generationConfig,
+    });
     return json?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '';
 }
 
@@ -302,11 +455,11 @@ async function callOpenAiCompatible(api, { system, user, image }) {
 }
 
 async function callText(api, payload) {
-    if (!api?.apiKey) throw new Error('API 키를 찾을 수 없음 (Express 키 또는 secrets.json 확인)');
-    if (api.provider === 'vertex') return callGemini(api, payload);
-    if (api.source === 'makersuite') {
-        throw new Error('Google AI Studio 연결은 지원하지 않음 — Vertex Express 키를 사용해주세요');
+    if (!api) throw new Error('연결 프로필을 찾을 수 없음');
+    if (api.source === 'vertexai') {
+        return callGemini(api, payload);
     }
+    if (!api.apiKey) throw new Error(`연결 프로필 "${api.name}"의 API 키를 찾을 수 없음`);
     return callOpenAiCompatible(api, payload);
 }
 
@@ -789,11 +942,10 @@ async function requestGeneratedImage(settings, prompt, references = []) {
         });
     }
     return callGoogle({
-        provider: 'vertex',
         model: settings.imageModel,
         apiKey: settings.imageApiKey,
         projectId: settings.imageProjectId,
-        region: settings.imageRegion,
+        region: settings.imageRegion || 'global',
     }, {
         contents: [{ role: 'user', parts }],
         generationConfig: {
@@ -875,6 +1027,9 @@ module.exports = {
     resolveTextApi,
     googleUrl,
     callGoogle,
+    getVertexAccessToken,
+    vertexProfileUrl,
+    callVertexProfile,
     readAvatar,
     readPersonaAvatar,
     readRecentChat,

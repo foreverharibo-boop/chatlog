@@ -177,3 +177,25 @@ public/user/images/chatlog/     # 생성된 이미지
 - 챗로그의 직접 Google 호출을 Vertex Express 전용 전역 경로로 단일화
 - 설정 화면의 이미지 API를 선택창 대신 `Vertex AI Express` 고정 표시로 변경
 - 기존 설정에 AI Studio 값이 남아 있어도 Vertex Express로 강제 정규화
+
+## v0.7.8 (철회)
+
+- 텍스트 인증 문제를 잘못 우회한 테스트 버전으로, v0.7.9에서 해당 변경을 전부 제거
+- 설치하지 말고 v0.7.9 이상 사용
+
+## v0.7.9 수정
+
+- v0.7.8의 AI Studio 인증 폴백을 완전히 제거
+- 게시 판단·댓글·반응 등 모든 텍스트 생성은 선택한 SillyTavern 연결 프로필에서 모델과 `secret-id`를 읽어 사용
+- Vertex 정식 연결 프로필은 저장된 서비스 계정 JSON으로 OAuth2 토큰을 발급받아 프로젝트·리전 엔드포인트로 호출
+- Vertex Express 연결 프로필은 그 프로필에 연결된 Express 키를 사용
+- 이미지 생성은 챗로그 설정에 별도로 입력한 Vertex Express 이미지 키만 사용
+- 브라우저를 닫아도 Termux에서 SillyTavern 서버가 실행 중이면 서버 스케줄러가 연결 프로필을 읽어 자동 생성
+
+## v0.7.10 수정
+
+- Vertex Express 요청 주소를 SillyTavern과 같은 프로젝트·리전 경로로 수정
+- 텍스트용 Vertex Express 연결 프로필은 해당 프로필의 프로젝트 ID와 리전을 URL에 적용
+- 이미지 생성도 같은 URL 빌더를 사용하며 챗로그에 저장된 이미지 프로젝트 ID와 리전을 적용
+- 설정 화면에 이미지 프로젝트 ID와 리전 입력란을 다시 표시
+- 프로젝트 ID가 비어 있으면 잘못된 요청을 보내지 않고 원인을 바로 표시

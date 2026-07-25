@@ -46,12 +46,11 @@ let settings = {
     followActiveProfile: true, // 클라이언트가 ST의 현재 연결 프로필을 자동 동기화
     userHandle: 'default-user',
     imageApiKey: '',        // 이미지 생성 키만 별도
-    textMode: 'express',                         // 'express' = 이미지와 같은 키로 텍스트도 생성 | 'profile' = ST 연결 프로필
-    textModel: 'gemini-2.5-flash',               // express 모드에서 쓸 텍스트 모델
-    imageProvider: 'vertex',                     // Vertex Express 전용
+    textMode: 'profile',                         // 텍스트는 ST 연결 프로필만 사용
+    imageProvider: 'vertex',                     // 이미지는 Vertex Express만 사용
     imageModel: 'gemini-3.1-flash-lite-image',   // 나노바나나 2 Lite
-    imageProjectId: '',                          // 구버전 설정 호환용 (Express에서는 사용 안 함)
-    imageRegion: 'global',                       // 구버전 설정 호환용 (Express에서는 사용 안 함)
+    imageProjectId: '',                          // Vertex Express 이미지 키가 속한 프로젝트
+    imageRegion: 'global',                       // Vertex Express 위치 (기본 global)
     userPersonaName: '',    // 유저 페르소나 이름 (클라이언트가 동기화)
     commentDelayMinMin: 1,
     commentDelayMaxMin: 30,
@@ -86,6 +85,9 @@ function loadAll() {
     db.runtime.skippedMissedSlots ??= 0;
     for (const job of db.jobs) job.attempts ??= 0;
     settings = { ...settings, ...loadJson(SETTINGS_PATH, {}) };
+    // v0.7.10: 텍스트는 ST 프로필, 이미지는 별도 Vertex Express 설정만 사용한다.
+    settings.textMode = 'profile';
+    settings.imageProvider = 'vertex';
 
     for (const room of Object.values(db.rooms)) {
         room.slotHistory ??= [];

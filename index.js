@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.7.7';
+const CHATLOG_VERSION = '0.7.10';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -229,21 +229,13 @@ const SETTINGS_HTML = `
       <div class="chatlog-setting-section">생성 연결</div>
 
       <div class="chatlog-setting-field">
-        <label for="chatlog-textmode">텍스트 생성</label>
-        <div class="chatlog-setting-control">
-          <select id="chatlog-textmode" class="text_pole">
-            <option value="express">이미지와 같은 Express 키 사용 (권장)</option>
-            <option value="profile">ST 연결 프로필 사용</option>
-          </select>
+        <span class="chatlog-setting-label">텍스트 생성</span>
+        <div class="chatlog-setting-control chatlog-fixed-provider">
+          <span>ST 연결 프로필</span>
+          <input id="chatlog-textmode" type="hidden" value="profile">
         </div>
       </div>
-
-      <div id="chatlog-textmodel-row" class="chatlog-setting-field">
-        <label for="chatlog-text-model">텍스트 모델</label>
-        <div class="chatlog-setting-control">
-          <input id="chatlog-text-model" type="text" class="text_pole" placeholder="gemini-2.5-flash">
-        </div>
-      </div>
+      <small class="chatlog-setting-help">게시 판단·댓글·반응은 선택한 프로필의 모델과 인증을 사용합니다.</small>
 
       <div id="chatlog-profile-field" class="chatlog-setting-field">
         <label for="chatlog-profile">연결 프로필</label>
@@ -268,7 +260,7 @@ const SETTINGS_HTML = `
           <input id="chatlog-image-provider" type="hidden" value="vertex">
         </div>
       </div>
-      <small class="chatlog-setting-help">Vertex Express는 프로젝트 ID·리전 없이 API 키만 사용합니다.</small>
+      <small class="chatlog-setting-help">Vertex Express 이미지 키가 속한 Google Cloud 프로젝트 ID와 리전을 함께 사용합니다.</small>
 
       <div class="chatlog-setting-field">
         <label for="chatlog-image-key">이미지 API 키</label>
@@ -277,9 +269,20 @@ const SETTINGS_HTML = `
         </div>
       </div>
 
-      <div id="chatlog-vertex-fields" hidden>
-        <input id="chatlog-image-project" type="hidden">
-        <input id="chatlog-image-region" type="hidden">
+      <div id="chatlog-vertex-fields">
+        <div class="chatlog-setting-field">
+          <label for="chatlog-image-project">프로젝트 ID</label>
+          <div class="chatlog-setting-control">
+            <input id="chatlog-image-project" type="text" class="text_pole" placeholder="Google Cloud 프로젝트 ID">
+          </div>
+        </div>
+        <div class="chatlog-setting-field">
+          <label for="chatlog-image-region">리전</label>
+          <div class="chatlog-setting-control">
+            <input id="chatlog-image-region" type="text" class="text_pole" placeholder="global">
+          </div>
+        </div>
+        <small class="chatlog-setting-help">보통 리전은 global입니다. 이미지 API 키를 만든 프로젝트 ID를 입력하세요.</small>
       </div>
 
       <div class="chatlog-setting-field">
@@ -449,17 +452,15 @@ const FALLBACK_SETTINGS = {
     commentDelayMinMin: 1, commentDelayMaxMin: 30,
     autoCleanup: false, cleanupAfterDays: 1, keepSaved: true,
     imageProvider: 'vertex', imageProjectId: '', imageRegion: 'global',
-    textMode: 'express', textModel: 'gemini-2.5-flash',
+    textMode: 'profile',
     followActiveProfile: true,
     characterCommentChance: 30,
 };
 
 function toggleTextMode() {
-    const express = $('#chatlog-textmode').val() === 'express';
-    $('#chatlog-textmodel-row').toggle(express);
-    $('#chatlog-profile-field').toggle(!express);
-    $('#chatlog-profile-follow-field').toggle(!express);
-    $('#chatlog-profile-count').toggle(!express);
+    $('#chatlog-profile-field').show();
+    $('#chatlog-profile-follow-field').show();
+    $('#chatlog-profile-count').show();
 }
 
 async function syncActiveConnectionProfile(profileName = null) {
@@ -477,9 +478,8 @@ async function syncActiveConnectionProfile(profileName = null) {
 }
 
 function toggleVertexFields() {
-    // v0.7.2부터 Vertex는 API 키 전용 Express 경로를 사용한다.
-    // 예전 설정값은 호환을 위해 보존하되 프로젝트/리전 입력칸은 표시하지 않는다.
-    $('#chatlog-vertex-fields').hide();
+    // Vertex Express도 projects/{projectId}/locations/{region} 경로를 사용한다.
+    $('#chatlog-vertex-fields').show();
 }
 
 function setImageModel(value) {
@@ -566,8 +566,7 @@ async function loadSettingsUi() {
     $('#chatlog-image-project').val(s.imageProjectId || '');
     $('#chatlog-image-region').val(s.imageRegion || 'global');
     toggleVertexFields();
-    $('#chatlog-textmode').val(s.textMode || 'express');
-    $('#chatlog-text-model').val(s.textModel || 'gemini-2.5-flash');
+    $('#chatlog-textmode').val('profile');
     toggleTextMode();
     $('#chatlog-delay-min').val(s.commentDelayMinMin);
     $('#chatlog-delay-max').val(s.commentDelayMaxMin);
@@ -619,8 +618,7 @@ async function saveSettingsUi() {
         imageProvider: $('#chatlog-image-provider').val(),
         imageProjectId: $('#chatlog-image-project').val().trim(),
         imageRegion: $('#chatlog-image-region').val().trim() || 'global',
-        textMode: $('#chatlog-textmode').val(),
-        textModel: $('#chatlog-text-model').val().trim() || 'gemini-2.5-flash',
+        textMode: 'profile',
         commentDelayMinMin: Number($('#chatlog-delay-min').val()),
         commentDelayMaxMin: Number($('#chatlog-delay-max').val()),
         characterCommentChance: Math.max(0, Math.min(100,
