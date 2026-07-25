@@ -440,11 +440,12 @@ function renderFeed() {
 }
 
 function postCard(p) {
-    const name = p.author === 'user' ? (ctx().name1 || '나') : (p.authorName || p.author);
+    const room = state.rooms[p.roomId];
+    const name = p.author === 'user' ? personaForRoom(room).name : (p.authorName || p.author);
 
     const comments = p.comments.map(c => `
       <div class="chatlog-comment${c.read ? '' : ' unread'}">
-        <img class="chatlog-cavatar" src="${avatarUrl(c.author)}">
+        <img class="chatlog-cavatar" src="${avatarUrl(c.author, room)}">
         <div class="chatlog-cbubble"><b>${esc(c.authorName || c.author)}</b> ${esc(c.text)}</div>
       </div>`).join('');
 
@@ -454,7 +455,7 @@ function postCard(p) {
           ${p.image ? `<img class="chatlog-photo" src="${esc(p.image)}">` : '<div class="chatlog-photo chatlog-nophoto"></div>'}
           <span class="chatlog-stamp">${timeLabel(p.createdAt)}</span>
           <div class="chatlog-author">
-            <img src="${avatarUrl(p.author)}"><span>${esc(name)}</span>
+            <img src="${avatarUrl(p.author, room)}"><span>${esc(name)}</span>
           </div>
           ${p.text ? `<div class="chatlog-caption">${esc(p.text)}</div>` : ''}
         </div>
