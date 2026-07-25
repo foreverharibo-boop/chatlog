@@ -264,6 +264,13 @@ function othersBlock(post, member) {
     return `\n\n[이미 달린 댓글 — 겹치지 않게]\n${lines.join('\n')}`;
 }
 
+function postAuthorName(settings, room, post) {
+    if (post.author === 'user') return settings.userPersonaName || '유저';
+    return post.authorName
+        || room.members.find(m => m.avatar === post.author)?.name
+        || post.author;
+}
+
 // ── 댓글 생성 ─────────────────────────────────────────────
 async function generateComment(settings, room, post, member) {
     const api = resolveTextApi(settings);
@@ -271,6 +278,11 @@ async function generateComment(settings, room, post, member) {
 
     const recent = readRecentChat(settings, member.name, 8);
     const isOwnPost = post.author === member.avatar;
+    const authorName = postAuthorName(settings, room, post);
+    const latestUserComment = [...(post.comments || [])].reverse().find(c => c.author === 'user');
+    const task = isOwnPost
+        ? `네가 챗로그에 올린 게시물에 ${settings.userPersonaName || '유저'}가 댓글을 달았다. 게시물에 새 댓글을 다는 게 아니라, 그 댓글에 답댓글을 단다.`
+        : `${authorName}가 챗로그에 올린 게시물에 댓글을 단다.`;
 
     const system = [
         `너는 "${member.name}"이다. 아래 인물을 완전히 연기한다.`,
@@ -278,11 +290,8 @@ async function generateComment(settings, room, post, member) {
         charBlock(member),
         recent ? `\n[최근 대화 — 지금 둘 사이의 분위기]\n${recent}` : '',
         '',
-        isOwnPost
-            ? `네가 chatlog에 올린 게시물에 ${settings.userPersonaName || '유저'}가 댓글을 달았다. 거기에 답댓글을 단다.`
-            : '',
         '지금 너는 "챗로그"라는 앱을 쓰고 있다. 친한 사람들끼리 하루 중 아무 순간이나 사진 한 장과 짧은 글로 올리는 앱이다.',
-        `${settings.userPersonaName || '유저'}가 방금 게시물을 올렸고, 너는 거기에 댓글을 단다.`,
+        task,
         '',
         '규칙:',
         '- 댓글은 1~2문장, 최대 40자 내외. 짧을수록 좋다.',
@@ -297,10 +306,15 @@ async function generateComment(settings, room, post, member) {
         `[${timeLabel(post.createdAt)}에 올라온 게시물]`,
         post.text ? `글: ${post.text}` : '(글 없음)',
         post.image ? '(사진 첨부됨)' : '(사진 없음)',
+        isOwnPost && latestUserComment
+            ? `\n[답할 댓글]\n${settings.userPersonaName || '유저'}: ${latestUserComment.text}`
+            : '',
         othersBlock(post, member),
         '',
-        '이 게시물에 달 댓글 하나만 출력하라.',
-    ].join('\n');
+        isOwnPost
+            ? '위 유저 댓글에 달 답댓글 하나만 출력하라.'
+            : '이 게시물에 달 댓글 하나만 출력하라.',
+    ].filter(Boolean).join('\n');
 
     const raw = await callText(api, {
         system,
@@ -316,6 +330,42 @@ async function generateComment(settings, room, post, member) {
         .split('\n')[0]
         .slice(0, 120)
         .trim();
+}
+
+// ── 캐릭터 이모지 반응 생성 ────────────────────────────────
+const REACTION_EMOJIS = ['❤️', '😂', '🥹', '😮', '😢', '😡', '👏', '🔥', '👍', '👀'];
+
+async function generateReaction(settings, room, post, member) {
+    const api = resolveTextApi(settings);
+    if (!api) throw new Error('연결 프로필을 찾을 수 없음');
+
+    const recent = readRecentChat(settings, member.name, 5);
+    const authorName = postAuthorName(settings, room, post);
+    const system = [
+        `너는 "${member.name}"이다. 아래 인물의 성격대로 반응한다.`,
+        '',
+        charBlock(member),
+        recent ? `\n[최근 대화 분위기]\n${recent}` : '',
+        '',
+        `"${authorName}"의 챗로그 게시물에 이모지 반응 하나를 남긴다.`,
+        `반드시 다음 중 딱 하나만 출력한다: ${REACTION_EMOJIS.join(' ')}`,
+        '설명, 이름, 문장, 따옴표를 붙이지 마라.',
+    ].filter(Boolean).join('\n');
+
+    const user = [
+        `[${timeLabel(post.createdAt)}에 올라온 게시물]`,
+        post.text ? `글: ${post.text}` : '(글 없음)',
+        post.image ? '(사진 첨부됨)' : '(사진 없음)',
+        '',
+        '이 게시물에 어울리고 네 성격에도 맞는 이모지 하나만 골라라.',
+    ].join('\n');
+
+    const raw = await callText(api, {
+        system,
+        user,
+        image: readImageAsBase64(post.image),
+    });
+    return REACTION_EMOJIS.find(emoji => String(raw).includes(emoji)) || '👍';
 }
 
 // ── 캐릭터 컷 생성 ────────────────────────────────────────
@@ -405,4 +455,16 @@ async function generateImage(settings, scene, reference = null) {
     return `/user/images/chatlog/${filename}`;
 }
 
-module.exports = { resolveTextApi, googleUrl, callGoogle, readAvatar, readRecentChat, getDebug, generateComment, generateCharacterCut, generateImage, timeLabel };
+module.exports = {
+    resolveTextApi,
+    googleUrl,
+    callGoogle,
+    readAvatar,
+    readRecentChat,
+    getDebug,
+    generateComment,
+    generateReaction,
+    generateCharacterCut,
+    generateImage,
+    timeLabel,
+};

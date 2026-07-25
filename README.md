@@ -31,8 +31,9 @@ server/  →  SillyTavern/plugins/chatlog/
 | 커맨드 | 설명 |
 |---|---|
 | `/chatlog` | 챗로그 열기 |
-| `/chatlog-run` | 대기 댓글 + 캐릭터 컷 전부 지금 실행 |
+| `/chatlog-run` | 대기 댓글 + 캐릭터 반응 + 캐릭터 컷 전부 지금 실행 |
 | `/chatlog-run what=comments` | 대기 중인 댓글만 지금 실행 |
+| `/chatlog-run what=reactions` | 대기 중인 캐릭터 이모지 반응만 지금 실행 |
 | `/chatlog-run what=cut` | 캐릭터 컷만 지금 생성 |
 | `/chatlog-run room=우리로그` | 특정 로그만 |
 | `/chatlog-now` | 다음 슬롯 시각을 지금으로 당김 (1분 내 실행) |
@@ -72,7 +73,7 @@ public/user/images/chatlog/     # 생성된 이미지
 ---
 
 ## 남은 작업
-프롬프트 튜닝 (`server/ai.js` 의 `generateComment`, `generateCharacterCut`)
+프롬프트 튜닝 (`server/ai.js` 의 `generateComment`, `generateReaction`, `generateCharacterCut`)
 
 ---
 

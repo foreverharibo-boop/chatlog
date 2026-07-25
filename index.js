@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.6.0';
+const CHATLOG_VERSION = '0.6.2';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -15,11 +15,18 @@ async function api(pathname, body) {
         ? { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers() }, body: JSON.stringify(body) }
         : { headers: headers() };
     const res = await fetch(API + pathname, opts);
-    if (!res.ok) throw new Error(`${pathname} ${res.status}`);
+    if (!res.ok) {
+        const detail = await res.json().catch(() => null);
+        throw new Error(detail?.error || `${pathname} ${res.status}`);
+    }
     return res.json();
 }
 
 const esc = (s) => $('<div>').text(s ?? '').html();
+const showError = (message) => {
+    if (window.toastr?.error) window.toastr.error(message);
+    else window.alert(message);
+};
 
 function timeLabel(ts) {
     const d = new Date(ts);
@@ -446,7 +453,56 @@ function feedState(room) {
     const slots = [...new Set(dayPosts.map(p => new Date(p.createdAt).getHours()))].sort((a, b) => a - b);
     if (f.slot == null || !slots.includes(f.slot)) f.slot = slots[slots.length - 1];
 
-    return { posts, days, dayPosts, slots, f };
+    const people = [
+        {
+            id: 'user',
+            name: personaForRoom(room).name,
+            avatar: avatarUrl('user', room),
+        },
+        ...room.members.map(m => ({
+            id: m.avatar,
+            name: m.name,
+            avatar: avatarUrl(m.avatar, room),
+        })),
+    ];
+
+    // 셋로그처럼 한 시간대 안에서도 참여자별 기록을 한 장씩 넘긴다.
+    // 같은 사람이 같은 시간에 여러 장을 올린 경우도 모두 별도 슬라이드로 보존한다.
+    const slides = [];
+    for (const hour of slots) {
+        const hourPosts = dayPosts.filter(p => new Date(p.createdAt).getHours() === hour);
+        for (const person of people) {
+            const ownPosts = hourPosts.filter(p => p.author === person.id);
+            if (ownPosts.length) {
+                ownPosts.forEach((post, index) => slides.push({
+                    key: `post:${post.id}`,
+                    hour,
+                    kind: 'post',
+                    post,
+                    person,
+                    duplicateIndex: index,
+                }));
+            } else {
+                slides.push({
+                    key: `empty:${hour}:${person.id}`,
+                    hour,
+                    kind: 'empty',
+                    person,
+                    timestamp: hourPosts[0]?.createdAt ?? Date.now(),
+                });
+            }
+        }
+    }
+
+    if (!slides.some(s => s.key === f.slideKey)) {
+        const latestPost = [...slides].reverse().find(s => s.kind === 'post');
+        f.slideKey = latestPost?.key || slides.at(-1)?.key || null;
+    }
+
+    const slideIndex = Math.max(0, slides.findIndex(s => s.key === f.slideKey));
+    if (slides[slideIndex]) f.slot = slides[slideIndex].hour;
+
+    return { posts, days, dayPosts, slots, slides, slideIndex, f };
 }
 
 function renderFeed() {
@@ -456,7 +512,7 @@ function renderFeed() {
     $('.chatlog-title').text(room.name);
     const $b = $('.chatlog-body').empty();
 
-    const { days, dayPosts, slots, f } = feedState(room);
+    const { days, dayPosts, slots, slides, slideIndex, f } = feedState(room);
 
     // 상단 바: 날짜 이동 + 올리기/하루로그
     const di = days.indexOf(f.day);
@@ -470,8 +526,22 @@ function renderFeed() {
         <span class="chatlog-slotbtn upload fa-solid fa-camera" title="올리기"></span>
         <span class="chatlog-slotbtn daylog fa-solid fa-clapperboard" title="하루로그"></span>
       </div>`);
-    $top.find('.prev').on('click', () => { if (di > 0) { f.day = days[di - 1]; f.slot = null; render(); } });
-    $top.find('.next').on('click', () => { if (di < days.length - 1) { f.day = days[di + 1]; f.slot = null; render(); } });
+    $top.find('.prev').on('click', () => {
+        if (di > 0) {
+            f.day = days[di - 1];
+            f.slot = null;
+            f.slideKey = null;
+            render();
+        }
+    });
+    $top.find('.next').on('click', () => {
+        if (di < days.length - 1) {
+            f.day = days[di + 1];
+            f.slot = null;
+            f.slideKey = null;
+            render();
+        }
+    });
     $top.find('.upload').on('click', () => uploadSheet(room));
     $top.find('.daylog').on('click', () => dayLogView(room));
     $b.append($top);
@@ -481,42 +551,65 @@ function renderFeed() {
         return;
     }
 
-    // 슬롯 도트
+    // 시간대 탭
     const $dots = $('<div class="chatlog-dots"></div>');
     slots.forEach(h => {
-        const $d = $(`<span class="chatlog-dot${h === f.slot ? ' on' : ''}" title="${hourLabelShort(h)}"></span>`);
-        $d.on('click', () => { f.slot = h; render(); });
+        const $d = $(`
+          <button type="button" class="chatlog-dot${h === f.slot ? ' on' : ''}" title="${hourLabelShort(h)}">
+            <span>${String(h).padStart(2, '0')}</span>
+          </button>`);
+        $d.on('click', () => {
+            const first = slides.find(s => s.hour === h && s.kind === 'post')
+                || slides.find(s => s.hour === h);
+            if (!first) return;
+            f.slot = h;
+            f.slideKey = first.key;
+            f.motion = 'jump';
+            render();
+        });
         $dots.append($d);
     });
     $b.append($dots);
 
-    // 이 슬롯의 카드 스택: 올라온 게시물 + 아직 안 올린 참여자의 회색 카드
-    const slotPosts = dayPosts.filter(p => new Date(p.createdAt).getHours() === f.slot);
-    const slotTs = slotPosts[0]?.createdAt ?? Date.now();
+    const current = slides[slideIndex];
+    if (!current) return;
 
-    const posted = new Set(slotPosts.map(p => p.author));
-    const $stack = $('<div class="chatlog-stack"></div>');
+    const sameHour = slides.filter(s => s.hour === current.hour);
+    const withinHour = sameHour.findIndex(s => s.key === current.key);
+    const $meta = $(`
+      <div class="chatlog-slide-meta">
+        <b>${String(current.hour).padStart(2, '0')}:00</b>
+        <span>${withinHour + 1} / ${sameHour.length}</span>
+      </div>`);
+    $b.append($meta);
 
-    for (const p of slotPosts) {
-        try {
-            $stack.append(slotCard(room, p, null));
-        } catch (e) {
-            console.error('[chatlog] 카드 렌더 실패', p.id, e);
-            $stack.append(`<div class="chatlog-rendererr">렌더 실패 (${esc(p.id)})<br>${esc(e.message)}</div>`);
-        }
+    const goSlide = delta => {
+        const nextIndex = slideIndex + delta;
+        if (nextIndex < 0 || nextIndex >= slides.length) return;
+        f.slideKey = slides[nextIndex].key;
+        f.slot = slides[nextIndex].hour;
+        f.motion = delta > 0 ? 'next' : 'prev';
+        render();
+    };
+
+    const $stage = $(`<div class="chatlog-stage motion-${f.motion || 'none'}"></div>`);
+    try {
+        const $slide = current.kind === 'post'
+            ? slotCard(room, current.post)
+            : placeholderCard(current.person.name, current.person.avatar, current.timestamp);
+        addSlideNavigation($slide, {
+            canPrev: slideIndex > 0,
+            canNext: slideIndex < slides.length - 1,
+            onPrev: () => goSlide(-1),
+            onNext: () => goSlide(1),
+        });
+        $stage.append($slide);
+    } catch (e) {
+        console.error('[chatlog] 카드 렌더 실패', current.key, e);
+        $stage.append(`<div class="chatlog-rendererr">렌더 실패 (${esc(current.key)})<br>${esc(e.message)}</div>`);
     }
-
-    // placeholder: 유저 → 멤버 순
-    if (!posted.has('user')) {
-        $stack.append(placeholderCard(personaForRoom(room).name, avatarUrl('user', room), slotTs));
-    }
-    for (const m of room.members) {
-        if (!posted.has(m.avatar)) {
-            $stack.append(placeholderCard(m.name, avatarUrl(m.avatar, room), slotTs));
-        }
-    }
-
-    $b.append($stack);
+    f.motion = 'none';
+    $b.append($stage);
 }
 
 function hourLabelShort(h) {
@@ -525,15 +618,78 @@ function hourLabelShort(h) {
 
 function placeholderCard(name, avatar, ts) {
     return $(`
-      <article class="chatlog-scard empty">
-        <div class="chatlog-sc-top"><img src="${avatar}"><span>${esc(name)}</span></div>
-        <div class="chatlog-sc-center"><div class="chatlog-sc-time dim">${hhmm(ts)}</div></div>
-      </article>`);
+      <div class="chatlog-cardwrap">
+        <article class="chatlog-scard empty">
+          <div class="chatlog-sc-top"><img src="${avatar}"><span>${esc(name)}</span></div>
+          <div class="chatlog-sc-center">
+            <div class="chatlog-sc-time dim">${hhmm(ts)}</div>
+            <div class="chatlog-empty-label">아직 기록 전</div>
+          </div>
+        </article>
+      </div>`);
+}
+
+function addSlideNavigation($slide, { canPrev, canNext, onPrev, onNext }) {
+    const $surface = $slide.find('.chatlog-scard').first();
+    if (!$surface.length) return;
+
+    const $prev = $(`<button type="button" class="chatlog-edge prev${canPrev ? '' : ' off'}" aria-label="이전 사진"></button>`);
+    const $next = $(`<button type="button" class="chatlog-edge next${canNext ? '' : ' off'}" aria-label="다음 사진"></button>`);
+    $surface.append($prev, $next);
+
+    let startX = 0;
+    let startY = 0;
+    let tracking = false;
+    let suppressClickUntil = 0;
+
+    if (canPrev) {
+        $prev.on('click', () => {
+            if (Date.now() < suppressClickUntil) return;
+            onPrev();
+        });
+    }
+    if (canNext) {
+        $next.on('click', () => {
+            if (Date.now() < suppressClickUntil) return;
+            onNext();
+        });
+    }
+
+    $surface.on('touchstart', e => {
+        if ($(e.target).closest('.chatlog-sc-btn, textarea, input').length) return;
+        const touch = e.originalEvent.touches?.[0];
+        if (!touch) return;
+        startX = touch.clientX;
+        startY = touch.clientY;
+        tracking = true;
+    });
+
+    $surface.on('touchend', e => {
+        if (!tracking) return;
+        tracking = false;
+        const touch = e.originalEvent.changedTouches?.[0];
+        if (!touch) return;
+        const dx = touch.clientX - startX;
+        const dy = touch.clientY - startY;
+        if (Math.abs(dx) < 46 || Math.abs(dx) <= Math.abs(dy) * 1.15) return;
+        // 스와이프 직후 브라우저가 합성하는 click으로 한 장 더 넘어가는 것을 막는다.
+        suppressClickUntil = Date.now() + 450;
+        if (dx < 0 && canNext) onNext();
+        if (dx > 0 && canPrev) onPrev();
+    });
 }
 
 function slotCard(room, p) {
     const name = p.author === 'user' ? personaForRoom(room).name : (p.authorName || p.author);
-    const reacts = (p.reactions || []).map(r => `<span class="chatlog-react">${esc(r.emoji)}</span>`).join('');
+    const reacts = (p.reactions || []).map(r => {
+        const rname = r.author === 'user'
+            ? personaForRoom(room).name
+            : (r.authorName || r.author);
+        return `<span class="chatlog-react" title="${esc(rname)}">
+          <img class="chatlog-ravatar" src="${avatarUrl(r.author, room)}" alt="">
+          <span>${esc(r.emoji)}</span>
+        </span>`;
+    }).join('');
     const canReply = p.author !== 'user';
 
     const comments = p.comments.map(c => {
@@ -575,8 +731,17 @@ function slotCard(room, p) {
 
     $card.find('.smile').on('click', () => $card.find('.chatlog-picker').toggle());
     $card.find('.chatlog-pick').on('click', async function () {
-        await api('/react', { roomId: p.roomId, postId: p.id, emoji: $(this).text() });
-        refresh();
+        const $pick = $(this);
+        if ($pick.hasClass('pending')) return;
+        $pick.addClass('pending');
+        try {
+            await api('/react', { roomId: p.roomId, postId: p.id, emoji: $pick.text() });
+            await refresh();
+        } catch (e) {
+            console.error('[chatlog] 이모지 반응 저장 실패', e);
+            showError('이모지 반응 저장 실패: ' + e.message);
+            $pick.removeClass('pending');
+        }
     });
     $card.find('.reply').on('click', () => replySheet(room, p));
 
@@ -852,6 +1017,13 @@ const COMMENT_RULES = [
 function buildCommentMessages(job) {
     const m = job.member || {};
     const p = job.post || {};
+    const room = state.rooms[job.roomId];
+    const userName = room ? personaForRoom(room).name : '유저';
+    const isOwnPost = p.author === m.avatar;
+    const authorName = p.author === 'user'
+        ? userName
+        : (p.authorName || room?.members?.find(x => x.avatar === p.author)?.name || p.author);
+    const latestUserComment = [...(p.comments || [])].reverse().find(c => c.author === 'user');
 
     const system = [
         `너는 "${m.name}"이다.`,
@@ -859,7 +1031,9 @@ function buildCommentMessages(job) {
         m.personality ? `성격: ${m.personality}` : '',
         m.mesExample ? `말투 예시:\n${m.mesExample}` : '',
         '',
-        `지금 "${job.roomName}" 로그에 올라온 게시물에 댓글을 단다.`,
+        isOwnPost
+            ? `네가 "${job.roomName}" 로그에 올린 게시물에 ${userName}가 댓글을 달았다. 새 댓글이 아니라 그 댓글에 답댓글을 단다.`
+            : `${authorName}가 "${job.roomName}" 로그에 올린 게시물에 댓글을 단다.`,
         COMMENT_RULES,
     ].filter(Boolean).join('\n');
 
@@ -867,8 +1041,9 @@ function buildCommentMessages(job) {
         `[${timeLabel(p.createdAt)} 게시물]`,
         p.text ? `글: ${p.text}` : '(글 없음)',
         p.image ? '(사진 첨부됨)' : '',
+        isOwnPost && latestUserComment ? `[답할 댓글]\n${userName}: ${latestUserComment.text}` : '',
         '',
-        '댓글 하나만 출력하라.',
+        isOwnPost ? '위 유저 댓글에 달 답댓글 하나만 출력하라.' : '댓글 하나만 출력하라.',
     ].filter(Boolean).join('\n');
 
     return [
@@ -1045,15 +1220,15 @@ function registerSlashCommands() {
 
     P.addCommandObject(Cmd.fromProps({
         name: 'chatlog-run',
-        helpString: '강제 실행. what=comments|cut|all (기본 all), room=로그 이름',
+        helpString: '강제 실행. what=comments|reactions|cut|all (기본 all), room=로그 이름',
         namedArgumentList: [
-            Arg?.fromProps?.({ name: 'what', description: 'comments | cut | all', defaultValue: 'all', isRequired: false }),
+            Arg?.fromProps?.({ name: 'what', description: 'comments | reactions | cut | all', defaultValue: 'all', isRequired: false }),
             Arg?.fromProps?.({ name: 'room', description: '로그 이름 (생략 시 전체)', isRequired: false }),
         ].filter(Boolean),
         callback: async (args) => {
             await ensureState();
             const r = await api('/force', { what: args.what || 'all', roomId: roomIdByName(args.room) });
-            const msg = `댓글 ${r.comments}개, 컷 ${r.cuts}개 생성` + (r.errors?.length ? ` / 오류 ${r.errors.length}건` : '');
+            const msg = `댓글 ${r.comments}개, 반응 ${r.reactions || 0}개, 컷 ${r.cuts}개 생성` + (r.errors?.length ? ` / 오류 ${r.errors.length}건` : '');
             toastr?.info?.(msg);
             if (r.errors?.length) console.warn('[chatlog]', r.errors);
             if ($overlay) refresh();

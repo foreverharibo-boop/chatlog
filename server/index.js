@@ -51,6 +51,23 @@ function loadAll() {
     db = loadJson(DATA_PATH, db);
     db.rooms ??= {}; db.posts ??= {}; db.jobs ??= [];
     settings = { ...settings, ...loadJson(SETTINGS_PATH, {}) };
+
+    // 예전 버전에 저장된 캐릭터 게시물/반응도 표시 이름을 복구한다.
+    for (const [roomId, posts] of Object.entries(db.posts)) {
+        const room = db.rooms[roomId];
+        for (const post of posts) {
+            post.comments ??= [];
+            post.reactions ??= [];
+            if (post.author !== 'user' && !post.authorName) {
+                post.authorName = room?.members?.find(m => m.avatar === post.author)?.name || post.author;
+            }
+            for (const reaction of post.reactions) {
+                if (reaction.author !== 'user' && !reaction.authorName) {
+                    reaction.authorName = room?.members?.find(m => m.avatar === reaction.author)?.name || reaction.author;
+                }
+            }
+        }
+    }
 }
 
 let saveTimer = null;
@@ -111,6 +128,20 @@ function enqueueComments(room, post) {
     saveDb();
 }
 
+function enqueueReactions(room, post) {
+    const minMs = Math.max(10 * 1000, settings.commentDelayMinMin * 30000);
+    const maxMs = Math.max(minMs, settings.commentDelayMaxMin * 60000);
+    for (const member of room.members) {
+        if (member.avatar === post.author) continue;
+        db.jobs.push({
+            id: uid('job'), type: 'reaction',
+            roomId: room.id, postId: post.id, charId: member.avatar,
+            runAt: Date.now() + rand(minMs, maxMs),
+        });
+    }
+    saveDb();
+}
+
 const findPost = (roomId, postId) => (db.posts[roomId] || []).find(p => p.id === postId);
 const findMember = (room, avatar) => room.members.find(m => m.avatar === avatar);
 
@@ -132,16 +163,37 @@ async function runJob(job) {
         });
     }
 
+    if (job.type === 'reaction') {
+        const post = findPost(job.roomId, job.postId);
+        if (!post) return;
+        const member = findMember(room, job.charId);
+        if (!member || member.avatar === post.author) return;
+        post.reactions ??= [];
+        const emoji = await ai.generateReaction(settings, room, post, member);
+        const existing = post.reactions.findIndex(r => r.author === member.avatar);
+        const reaction = {
+            author: member.avatar,
+            authorName: member.name,
+            emoji,
+            createdAt: Date.now(),
+        };
+        if (existing >= 0) post.reactions.splice(existing, 1, reaction);
+        else post.reactions.push(reaction);
+    }
+
     if (job.type === 'cut') {
         const member = findMember(room, job.charId);
         if (!member) return;
         const { text, image } = await ai.generateCharacterCut(settings, room, member, job.slotAt);
-        (db.posts[room.id] ??= []).push({
+        const post = {
             id: uid('post'), roomId: room.id, author: job.charId,
+            authorName: member.name,
             slotAt: job.slotAt, createdAt: Date.now(),
             text, image, imageSource: 'generated',
-            read: false, comments: [],
-        });
+            read: false, comments: [], reactions: [],
+        };
+        (db.posts[room.id] ??= []).push(post);
+        enqueueReactions(room, post);
     }
 }
 
@@ -287,12 +339,14 @@ async function init(router) {
 
         const post = {
             id: uid('post'), roomId, author: 'user',
+            authorName: settings.userPersonaName || null,
             slotAt: Date.now(), createdAt: Date.now(),
             text, image, imageSource: 'upload',
-            read: true, comments: [],
+            read: true, comments: [], reactions: [],
         };
         (db.posts[roomId] ??= []).push(post);
         enqueueComments(room, post);
+        enqueueReactions(room, post);
         saveDb();
         res.json(post);
     });
@@ -388,15 +442,21 @@ async function init(router) {
         res.json({ ok: true });
     });
 
-    // 이모지 반응 토글
+    // 유저 이모지 반응 토글
     router.post('/react', (req, res) => {
         const { roomId, postId, emoji } = req.body || {};
         const post = findPost(roomId, postId);
         if (!post) return res.status(404).json({ error: 'post not found' });
+        if (!emoji?.trim()) return res.status(400).json({ error: 'emoji is required' });
         post.reactions ??= [];
         const i = post.reactions.findIndex(r => r.author === 'user' && r.emoji === emoji);
         if (i >= 0) post.reactions.splice(i, 1);
-        else post.reactions.push({ author: 'user', emoji });
+        else post.reactions.push({
+            author: 'user',
+            authorName: settings.userPersonaName || null,
+            emoji: emoji.trim().slice(0, 16),
+            createdAt: Date.now(),
+        });
         saveDb();
         res.json({ ok: true, reactions: post.reactions });
     });
@@ -434,13 +494,13 @@ async function init(router) {
     });
 
     // ── 강제 실행 ─────────────────────────────────────────
-    // what: 'comments' | 'cut' | 'all'
+    // what: 'comments' | 'reactions' | 'cut' | 'all'
     router.post('/force', async (req, res) => {
         const { roomId, what = 'all' } = req.body || {};
         const rooms = roomId ? [db.rooms[roomId]].filter(Boolean) : Object.values(db.rooms);
         if (!rooms.length) return res.status(404).json({ error: 'room not found' });
 
-        const done = { comments: 0, cuts: 0, errors: [] };
+        const done = { comments: 0, reactions: 0, cuts: 0, errors: [] };
 
         for (const room of rooms) {
             // 1. 대기 중인 댓글 작업 즉시 실행
@@ -460,6 +520,17 @@ async function init(router) {
                         await runJob({ type: 'cut', roomId: room.id, charId: member.avatar, slotAt: Date.now() });
                         done.cuts++;
                     } catch (e) { done.errors.push(`cut(${member.name}): ${e.message}`); }
+                }
+            }
+
+            // 3. 대기 중인 캐릭터 반응 즉시 실행
+            // all에서는 바로 위에서 새로 만든 컷의 반응 작업도 함께 처리한다.
+            if (what === 'all' || what === 'reactions') {
+                const pending = db.jobs.filter(j => j.roomId === room.id && j.type === 'reaction');
+                db.jobs = db.jobs.filter(j => !(j.roomId === room.id && j.type === 'reaction'));
+                for (const job of pending) {
+                    try { await runJob(job); done.reactions++; }
+                    catch (e) { done.errors.push(`reaction: ${e.message}`); }
                 }
             }
         }
