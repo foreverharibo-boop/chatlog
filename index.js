@@ -4,6 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
+const CHATLOG_VERSION = '0.4.1';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -435,7 +436,12 @@ function renderFeed() {
             lastDay = dk;
             $b.append(`<div class="chatlog-daysep">${new Date(p.createdAt).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric', weekday: 'short' })}</div>`);
         }
-        $b.append(postCard(p));
+        try {
+            $b.append(postCard(p));
+        } catch (e) {
+            console.error('[chatlog] 게시물 렌더 실패', p.id, e);
+            $b.append(`<div class="chatlog-post" style="padding:12px;border:1px dashed #533;border-radius:12px;font-size:0.8em;opacity:0.7">렌더 실패 (${esc(p.id)})<br>${esc(e.message)}<br><small>${esc((e.stack||'').split('\n')[1]||'')}</small></div>`);
+        }
     }
 }
 
@@ -988,6 +994,7 @@ window.cl = {
     jobs: () => api('/jobs'),
     cleanup: () => api('/cleanup', { force: true }),
     debug: () => api('/debug'),
+    version: CHATLOG_VERSION,
     help: () => console.table({
         'cl.rooms()': '방 목록 + 다음 슬롯',
         "cl.run('cut'|'comments'|'all')": '지금 강제 생성',
@@ -1062,5 +1069,5 @@ jQuery(async () => {
     }, ms));
 
     registerSlashCommands();
-    console.log('[chatlog] 로드됨 — 콘솔에서 cl.help() 로 디버그 명령 확인');
+    console.log(`[chatlog] v${CHATLOG_VERSION} 로드됨 — cl.help() 로 디버그 명령 확인`);
 });
