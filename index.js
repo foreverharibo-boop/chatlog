@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.7.14';
+const CHATLOG_VERSION = '0.7.15';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -286,8 +286,28 @@ const SETTINGS_HTML = `
           <button id="chatlog-test-image" type="button" class="menu_button chatlog-mini-button">테스트</button>
         </div>
       </div>
-      <small class="chatlog-setting-help">선택한 ST 프로필의 이미지 모델·키·프로젝트 ID·리전을 자동으로 사용합니다. 프로필에서 키를 바꾸면 챗로그에도 바로 반영됩니다.</small>
+      <small class="chatlog-setting-help">선택한 ST 프로필에서는 키·프로젝트 ID·리전만 가져옵니다. 프로필의 모델명은 이미지 요청에 사용하지 않습니다.</small>
       <small id="chatlog-image-profile-info" class="chatlog-setting-help"></small>
+
+      <div class="chatlog-setting-field">
+        <label for="chatlog-image-model">이미지 모델</label>
+        <div class="chatlog-setting-control">
+          <select id="chatlog-image-model" class="text_pole">
+            <option value="gemini-3.1-flash-lite-image">나노바나나 2 Lite — 빠름 (권장)</option>
+            <option value="gemini-3.1-flash-image">나노바나나 2 — 균형</option>
+            <option value="gemini-3-pro-image">나노바나나 Pro — 고화질</option>
+            <option value="gemini-2.5-flash-image">나노바나나 (구버전)</option>
+            <option value="__custom">직접 입력</option>
+          </select>
+        </div>
+      </div>
+      <div class="chatlog-setting-field chatlog-custom-model-field">
+        <span class="chatlog-setting-label">직접 입력</span>
+        <div class="chatlog-setting-control">
+          <input id="chatlog-image-model-custom" type="text" class="text_pole" placeholder="Vertex 이미지 모델 ID">
+        </div>
+      </div>
+      <small class="chatlog-setting-help">기본값은 Vertex Express에서 검증된 gemini-3.1-flash-lite-image입니다. -preview 이름은 요청에 사용하지 않습니다.</small>
       <small id="chatlog-test-result" class="chatlog-setting-help"></small>
 
       <div class="chatlog-setting-section">게시 일정</div>
@@ -436,8 +456,8 @@ function profileModel(profile) {
     return String(profile?.model || '');
 }
 
-function isImageProfile(profile) {
-    return /(?:image|imagen|nano)/i.test(profileModel(profile));
+function isVertexProfile(profile) {
+    return (profile?.['api-source'] || profile?.api) === 'vertexai';
 }
 
 function refreshImageProfileSelect(selected) {
@@ -448,7 +468,12 @@ function refreshImageProfileSelect(selected) {
     let keep = selected !== undefined
         ? savedImageProfileName
         : ($sel.val() || savedImageProfileName);
-    if (!keep) keep = profiles.find(isImageProfile)?.name || '';
+    if (!keep) {
+        const textProfile = profiles.find(profile => profile.name === $('#chatlog-profile').val());
+        keep = (isVertexProfile(textProfile) ? textProfile : null)?.name
+            || profiles.find(isVertexProfile)?.name
+            || '';
+    }
 
     $sel.empty().append('<option value="">-- 이미지 프로필 선택 --</option>');
     profiles.forEach(profile => {
@@ -470,7 +495,7 @@ function updateImageProfileInfo() {
     const name = $('#chatlog-image-profile').val();
     const profile = getProfiles().find(item => item.name === name);
     if (!name) {
-        $('#chatlog-image-profile-info').text('나노바나나 이미지 모델이 설정된 ST 연결 프로필을 골라주세요.');
+        $('#chatlog-image-profile-info').text('Vertex 인증 정보가 저장된 ST 연결 프로필을 골라주세요.');
         return;
     }
     if (!profile) {
@@ -478,12 +503,37 @@ function updateImageProfileInfo() {
         return;
     }
     const model = profileModel(profile) || '모델 미지정';
-    const warning = isImageProfile(profile) ? '' : ' · ⚠ 이미지 모델인지 확인 필요';
-    $('#chatlog-image-profile-info').text(`${profile.name} · ${model}${warning}`);
+    const warning = isVertexProfile(profile) ? '' : ' · ⚠ Vertex AI 프로필 필요';
+    $('#chatlog-image-profile-info').text(
+        `${profile.name} · 인증 정보만 사용 · 프로필 모델 ${model}은 무시${warning}`,
+    );
+}
+
+function setImageModel(value) {
+    const $select = $('#chatlog-image-model');
+    const model = String(value || 'gemini-3.1-flash-lite-image').trim();
+    const known = $select.find('option').map((_, option) => option.value).get();
+    const custom = !!model && !known.includes(model);
+    if (custom) {
+        $select.val('__custom');
+        $('#chatlog-image-model-custom').val(model);
+    } else {
+        $select.val(model || 'gemini-3.1-flash-lite-image');
+        $('#chatlog-image-model-custom').val('');
+    }
+    $('.chatlog-custom-model-field').toggle(custom);
+}
+
+function readImageModel() {
+    const selected = $('#chatlog-image-model').val();
+    return selected === '__custom'
+        ? $('#chatlog-image-model-custom').val().trim()
+        : selected;
 }
 
 const FALLBACK_SETTINGS = {
     profileName: '', imageProfileName: '',
+    imageModel: 'gemini-3.1-flash-lite-image',
     commentDelayMinMin: 1, commentDelayMaxMin: 30,
     autoCleanup: false, cleanupAfterDays: 1, keepSaved: true,
     textMode: 'profile',
@@ -567,6 +617,7 @@ async function loadSettingsUi() {
     }
 
     refreshImageProfileSelect(s.imageProfileName);
+    setImageModel(s.imageModel);
     $('#chatlog-textmode').val('profile');
     toggleTextMode();
     $('#chatlog-delay-min').val(s.commentDelayMinMin);
@@ -613,6 +664,7 @@ async function saveSettingsUi() {
     await api('/settings', {
         profileName: $('#chatlog-profile').val(),
         imageProfileName: $('#chatlog-image-profile').val(),
+        imageModel: readImageModel(),
         followActiveProfile: $('#chatlog-follow-profile').is(':checked'),
         textMode: 'profile',
         commentDelayMinMin: Number($('#chatlog-delay-min').val()),
@@ -2118,11 +2170,17 @@ jQuery(async () => {
     });
     $('#chatlog-textmode').on('change', toggleTextMode);
     $('#chatlog-image-profile').on('change', updateImageProfileInfo);
+    $('#chatlog-image-model').on('change', function () {
+        const custom = this.value === '__custom';
+        $('.chatlog-custom-model-field').toggle(custom);
+        if (custom) $('#chatlog-image-model-custom').trigger('focus');
+    });
     $('#chatlog-test-image').on('click', async () => {
         const $r = $('#chatlog-test-result').text('생성 중...');
         try {
             await api('/settings', {
                 imageProfileName: $('#chatlog-image-profile').val(),
+                imageModel: readImageModel(),
             });
             const r = await api('/test/image', {});
             $r.html(`성공 — <a href="${r.path}" target="_blank">이미지 보기</a>`);

@@ -49,7 +49,7 @@ let settings = {
     imageApiKey: '',        // v0.7.13 이하 설정 호환용 (신규 호출에는 사용하지 않음)
     textMode: 'profile',                         // 텍스트는 ST 연결 프로필만 사용
     imageProvider: 'vertex',                     // 이미지는 Vertex Express만 사용
-    imageModel: 'gemini-3.1-flash-lite-image',   // v0.7.13 이하 설정 호환용
+    imageModel: 'gemini-3.1-flash-lite-image',   // 실제 이미지 요청에 사용할 모델
     imageProjectId: '',                          // v0.7.13 이하 설정 호환용
     imageRegion: 'global',                       // v0.7.13 이하 설정 호환용
     userPersonaName: '',    // 유저 페르소나 이름 (클라이언트가 동기화)

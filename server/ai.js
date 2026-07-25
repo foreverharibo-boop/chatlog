@@ -68,7 +68,7 @@ function resolveProfileApi(settings, profileName, kind = 'text') {
     const profiles = stSettings?.extension_settings?.connectionManager?.profiles || [];
     const profile = profiles.find(p => p.name === profileName)
         || (!profileName && kind === 'image'
-            ? profiles.find(p => /(?:image|imagen|nano)/i.test(String(p?.model || '')))
+            ? profiles.find(p => (p?.['api-source'] || p?.api) === 'vertexai')
             : null);
     if (!profile) return null;
 
@@ -150,11 +150,11 @@ function resolveTextApi(settings) {
 }
 
 function resolveImageApi(settings) {
-    // 이미지는 이미지용 ST 연결 프로필을 매 호출마다 다시 읽는다.
-    // 같은 프로필에서 키를 교체하면 챗로그 설정을 다시 저장할 필요가 없다.
+    // 연결 프로필에서는 인증 정보만 읽는다. 실제 이미지 모델은 챗로그 설정값만 사용한다.
+    // 따라서 인증 프로필의 텍스트 모델명이나 -preview 모델명이 이미지 요청으로 전달되지 않는다.
     const api = resolveProfileApi(
         settings,
-        settings.imageProfileName,
+        settings.imageProfileName || settings.profileName,
         'image',
     );
     if (!api) {
@@ -163,11 +163,15 @@ function resolveImageApi(settings) {
     if (api.source !== 'vertexai') {
         throw new Error(`이미지 연결 프로필은 Vertex AI여야 합니다 (${api.source})`);
     }
-    if (!api.model) {
-        throw new Error('이미지 연결 프로필의 모델을 찾을 수 없습니다');
+    const imageModel = String(settings.imageModel || 'gemini-3.1-flash-lite-image').trim();
+    if (!imageModel) {
+        throw new Error('챗로그 이미지 모델이 비어 있습니다');
     }
-    if (!/(?:image|imagen|nano)/i.test(api.model)) {
-        throw new Error(`이미지 연결 프로필의 모델이 이미지 모델이 아닙니다 (${api.model})`);
+    if (/-preview(?:$|-)/i.test(imageModel)) {
+        throw new Error(`-preview 이미지 모델명은 Vertex 요청에 사용할 수 없습니다 (${imageModel})`);
+    }
+    if (!/(?:image|imagen|nano)/i.test(imageModel)) {
+        throw new Error(`챗로그 설정값이 이미지 모델이 아닙니다 (${imageModel})`);
     }
     if (!api.projectId) {
         throw new Error(`이미지 연결 프로필 "${api.name}"의 프로젝트 ID를 찾을 수 없습니다`);
@@ -178,7 +182,11 @@ function resolveImageApi(settings) {
     if (api.authMode === 'full' && !api.serviceAccount) {
         throw new Error(`이미지 연결 프로필 "${api.name}"의 서비스 계정 정보를 찾을 수 없습니다`);
     }
-    return api;
+    return {
+        ...api,
+        authProfileModel: api.model || '',
+        model: imageModel,
+    };
 }
 
 function imageMime(file) {
