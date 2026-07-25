@@ -162,3 +162,18 @@ public/user/images/chatlog/     # 생성된 이미지
 - WebM 동영상으로 저장되던 내보내기를 실제 GIF 파일 생성으로 교체
 - GIF에서도 같은 시간대에 여러 명이 올린 사진은 한 프레임 안에 나란히 배치
 - 현재 보고 있는 날짜의 하루로그를 저장하도록 날짜 선택 연동
+
+## v0.7.6 수정
+
+- Vertex Express 요청의 API 키를 공식 REST 형식인 `?key=` 쿼리로 전송해 `CREDENTIALS_MISSING` 401 수정
+- Vertex 인증이 거절되면 동일 키로 Google AI Studio 경로를 한 번 자동 재시도
+- 채팅 입력부의 🙃 빠른 열기 버튼을 28px로 축소
+- 화면에서 🍯 버튼을 찾으면 그 바로 왼쪽으로 빠른 열기 버튼을 자동 이동
+- 🍯 버튼을 아직 찾지 못한 경우에도 왼쪽 입력 도구 영역을 우선 사용
+
+## v0.7.7 변경 사항
+
+- Google AI Studio 선택지, 엔드포인트 및 인증 실패 자동 재시도 제거
+- 챗로그의 직접 Google 호출을 Vertex Express 전용 전역 경로로 단일화
+- 설정 화면의 이미지 API를 선택창 대신 `Vertex AI Express` 고정 표시로 변경
+- 기존 설정에 AI Studio 값이 남아 있어도 Vertex Express로 강제 정규화

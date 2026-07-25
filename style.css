@@ -678,6 +678,16 @@ html > .chatlog-sheet * {
     flex: 0 0 auto;
     margin: 0;
 }
+.chatlog-fixed-provider {
+    display: flex;
+    align-items: center;
+    min-height: 34px;
+    padding: 6px 10px;
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 76%, transparent);
+    font-size: 0.88em;
+    font-weight: 650;
+}
 .chatlog-control-row {
     display: flex;
     align-items: center;
@@ -764,49 +774,58 @@ html > .chatlog-sheet * {
 /* 입력창 옆 빠른 열기 */
 #chatlog-quick-open.chatlog-quick-open {
     position: relative;
-    display: flex;
-    flex: 0 0 40px;
+    display: inline-flex !important;
+    flex: 0 0 28px !important;
     align-items: center;
     justify-content: center;
-    width: 40px;
-    height: 40px;
-    margin: 0 2px;
-    padding: 0;
+    width: 28px !important;
+    min-width: 28px !important;
+    max-width: 28px !important;
+    height: 28px !important;
+    min-height: 28px !important;
+    max-height: 28px !important;
+    margin: 0 3px !important;
+    padding: 0 !important;
     appearance: none;
-    border: 0;
-    border-radius: 12px;
-    background: transparent;
-    color: inherit;
+    border: 0 !important;
+    border-radius: 9px !important;
+    background: transparent !important;
+    color: inherit !important;
     cursor: pointer;
-    font: inherit;
-    line-height: 1;
+    font: inherit !important;
+    line-height: 1 !important;
+    box-sizing: border-box !important;
+    vertical-align: middle;
+    overflow: visible !important;
     -webkit-tap-highlight-color: transparent;
 }
 #chatlog-quick-open.chatlog-quick-open:hover {
-    background: color-mix(in srgb, var(--SmartThemeBodyColor) 10%, transparent);
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 10%, transparent) !important;
 }
 #chatlog-quick-open.busy {
     opacity: 0.45;
     pointer-events: none;
 }
 .chatlog-quick-face {
-    font-size: 22px;
-    transform: translateY(-1px);
+    display: block;
+    font-size: 17px !important;
+    line-height: 1 !important;
+    transform: none;
 }
 .chatlog-quick-badge {
     position: absolute;
-    top: -3px;
-    right: -3px;
-    min-width: 17px;
-    height: 17px;
-    padding: 0 4px;
-    border: 2px solid var(--SmartThemeBlurTintColor, #fff);
+    top: -5px;
+    right: -5px;
+    min-width: 14px;
+    height: 14px;
+    padding: 0 3px;
+    border: 1px solid var(--SmartThemeBlurTintColor, #fff);
     border-radius: 999px;
     background: #ff4a3d;
     color: #fff;
-    font-size: 10px;
+    font-size: 9px;
     font-weight: 800;
-    line-height: 13px;
+    line-height: 12px;
     text-align: center;
     box-sizing: border-box;
 }

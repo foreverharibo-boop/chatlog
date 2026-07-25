@@ -23,7 +23,7 @@ function resolveTextApi(settings) {
             source: 'vertexai',
             model: settings.textModel || 'gemini-2.5-flash',
             apiKey: settings.imageApiKey,
-            provider: settings.imageProvider === 'aistudio' ? 'aistudio' : 'vertex',
+            provider: 'vertex',
             projectId: settings.imageProjectId || '',
             region: settings.imageRegion || 'global',
         };
@@ -44,7 +44,7 @@ function resolveTextApi(settings) {
         model: profile.model,
         apiKey: secrets[`api_key_${source}`] || secrets[`api_key_vertexai`] || '',
         customUrl: profile['custom-url'] || profile.reverse_proxy || '',
-        provider: source === 'vertexai' ? 'vertex' : 'aistudio',
+        provider: source === 'vertexai' ? 'vertex' : 'other',
         projectId: profile.vertexai_project || settings.imageProjectId || '',
         region: profile.vertexai_region || settings.imageRegion || 'global',
     };
@@ -219,31 +219,23 @@ function readImageAsBase64(webPath) {
     }
 }
 
-// ── Google 엔드포인트 (AI Studio / Vertex Express 공용) ──
-/**
- * 폴라로이드 프록시와 같은 방식. Vertex Express 모드는 서비스 계정 OAuth 없이
- * API 키를 x-goog-api-key 헤더로 그대로 넘긴다.
- */
-function googleUrl({ provider, model }) {
-    if (provider === 'vertex') {
-        // Express Mode는 API 키 전용 전역 경로를 사용한다.
-        // projects/locations가 포함된 표준 Vertex 경로는 OAuth2를 요구해
-        // Express 키를 보내면 CREDENTIALS_MISSING 401이 발생한다.
-        return `https://aiplatform.googleapis.com/v1/publishers/google/models/${model}:generateContent`;
-    }
-    return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+// ── Google 엔드포인트 (Vertex Express 전용) ──────────────
+function googleUrl({ model, apiKey }) {
+    // Express Mode는 projects/locations가 없는 전역 경로와 ?key= 인증을 쓴다.
+    return `https://aiplatform.googleapis.com/v1/publishers/google/models/${model}:generateContent`
+        + `?key=${encodeURIComponent(apiKey)}`;
 }
 
 async function callGoogle(cfg, body) {
     const res = await fetch(googleUrl(cfg), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cfg.apiKey },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
     });
     if (!res.ok) {
         const detail = await res.text();
-        console.error('[chatlog] Google API 오류', cfg.provider, cfg.model, res.status, detail);
-        throw new Error(`${cfg.provider === 'vertex' ? 'vertex' : 'google'} ${res.status} (${cfg.model}): ${detail.slice(0, 600)}`);
+        console.error('[chatlog] Vertex Express API 오류', cfg.model, res.status, detail);
+        throw new Error(`vertex ${res.status} (${cfg.model}): ${detail.slice(0, 600)}`);
     }
     return res.json();
 }
@@ -311,8 +303,9 @@ async function callOpenAiCompatible(api, { system, user, image }) {
 
 async function callText(api, payload) {
     if (!api?.apiKey) throw new Error('API 키를 찾을 수 없음 (Express 키 또는 secrets.json 확인)');
-    if (api.provider === 'vertex' || api.source === 'makersuite' || /gemini/i.test(api.model || '')) {
-        return callGemini(api, payload);
+    if (api.provider === 'vertex') return callGemini(api, payload);
+    if (api.source === 'makersuite') {
+        throw new Error('Google AI Studio 연결은 지원하지 않음 — Vertex Express 키를 사용해주세요');
     }
     return callOpenAiCompatible(api, payload);
 }
@@ -796,7 +789,7 @@ async function requestGeneratedImage(settings, prompt, references = []) {
         });
     }
     return callGoogle({
-        provider: settings.imageProvider === 'vertex' ? 'vertex' : 'aistudio',
+        provider: 'vertex',
         model: settings.imageModel,
         apiKey: settings.imageApiKey,
         projectId: settings.imageProjectId,

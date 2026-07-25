@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.7.5';
+const CHATLOG_VERSION = '0.7.7';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -262,12 +262,10 @@ const SETTINGS_HTML = `
       <small id="chatlog-profile-count" class="chatlog-setting-help"></small>
 
       <div class="chatlog-setting-field">
-        <label for="chatlog-image-provider">이미지 API</label>
-        <div class="chatlog-setting-control">
-          <select id="chatlog-image-provider" class="text_pole">
-            <option value="vertex">Vertex AI (Express 모드)</option>
-            <option value="aistudio">Google AI Studio</option>
-          </select>
+        <span class="chatlog-setting-label">이미지 API</span>
+        <div class="chatlog-setting-control chatlog-fixed-provider">
+          <span>Vertex AI Express</span>
+          <input id="chatlog-image-provider" type="hidden" value="vertex">
         </div>
       </div>
       <small class="chatlog-setting-help">Vertex Express는 프로젝트 ID·리전 없이 API 키만 사용합니다.</small>
@@ -564,7 +562,7 @@ async function loadSettingsUi() {
         $('#chatlog-image-key').val('').attr('placeholder', '이미지 전용 키');
     }
     setImageModel(s.imageModel);
-    $('#chatlog-image-provider').val(s.imageProvider || 'vertex');
+    $('#chatlog-image-provider').val('vertex');
     $('#chatlog-image-project').val(s.imageProjectId || '');
     $('#chatlog-image-region').val(s.imageRegion || 'global');
     toggleVertexFields();
@@ -662,30 +660,67 @@ function updateQuickOpenBadge() {
         count ? `챗로그 열기, 새 기록 ${count}개` : '챗로그 열기');
 }
 
-function ensureQuickOpenButton() {
-    if ($('#chatlog-quick-open').length) {
-        updateQuickOpenBadge();
-        return;
-    }
-    const $button = $(`
-      <button id="chatlog-quick-open" type="button" class="chatlog-quick-open interactable"
-        title="챗로그 열기" aria-label="챗로그 열기">
-        <span class="chatlog-quick-face" aria-hidden="true">🙃</span>
-        <span id="chatlog-quick-badge" class="chatlog-quick-badge" style="display:none"></span>
-      </button>`);
-    $button.on('click', event => {
-        event.preventDefault();
-        event.stopPropagation();
-        openChatlog();
-    });
+function findHoneyPotAnchor() {
+    const $roots = $('#send_form, #form_sheld');
+    if (!$roots.length) return $();
+    const isHoney = element => $(element).text().replace(/\uFE0F/g, '').trim() === '🍯';
 
-    const $sendButton = $('#send_but');
-    if ($sendButton.length) $button.insertBefore($sendButton);
-    else {
-        const $host = $('#rightSendForm, #send_form').first();
-        if ($host.length) $button.appendTo($host);
-        else return;
+    const $matches = $roots.find('*').filter(function () {
+        if (this.id === 'chatlog-quick-open' || $(this).find('#chatlog-quick-open').length) return false;
+        return isHoney(this);
+    });
+    const $leaf = $matches.filter(function () {
+        return !$(this).find('*').filter((_, child) => isHoney(child)).length;
+    }).first();
+    if (!$leaf.length) return $();
+
+    const $clickable = $leaf.closest('button, [role="button"], .interactable, .menu_button');
+    return $clickable.length ? $clickable.first() : $leaf;
+}
+
+function placeQuickOpenButton($button) {
+    const $honeyPot = findHoneyPotAnchor();
+    if ($honeyPot.length) {
+        if (!$button.next().is($honeyPot)) $button.insertBefore($honeyPot);
+        $button.addClass('chatlog-near-honey');
+        return true;
     }
+
+    $button.removeClass('chatlog-near-honey');
+    const $left = $('#leftSendForm').first();
+    if ($left.length) {
+        if (!$button.parent().is($left)) $button.prependTo($left);
+        return true;
+    }
+    const $sendButton = $('#send_but').first();
+    if ($sendButton.length) {
+        if (!$button.next().is($sendButton)) $button.insertBefore($sendButton);
+        return true;
+    }
+    const $host = $('#rightSendForm, #send_form').first();
+    if ($host.length) {
+        if (!$button.parent().is($host)) $button.prependTo($host);
+        return true;
+    }
+    return false;
+}
+
+function ensureQuickOpenButton() {
+    let $button = $('#chatlog-quick-open');
+    if (!$button.length) {
+        $button = $(`
+          <button id="chatlog-quick-open" type="button" class="chatlog-quick-open"
+            title="챗로그 열기" aria-label="챗로그 열기">
+            <span class="chatlog-quick-face" aria-hidden="true">🙃</span>
+            <span id="chatlog-quick-badge" class="chatlog-quick-badge" style="display:none"></span>
+          </button>`);
+        $button.on('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            openChatlog();
+        });
+    }
+    if (!placeQuickOpenButton($button)) return;
     updateQuickOpenBadge();
 }
 
