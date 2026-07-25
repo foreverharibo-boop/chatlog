@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.7.13';
+const CHATLOG_VERSION = '0.7.14';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -279,56 +279,15 @@ const SETTINGS_HTML = `
       <small id="chatlog-profile-count" class="chatlog-setting-help"></small>
 
       <div class="chatlog-setting-field">
-        <span class="chatlog-setting-label">이미지 API</span>
-        <div class="chatlog-setting-control chatlog-fixed-provider">
-          <span>Vertex AI Express</span>
-          <input id="chatlog-image-provider" type="hidden" value="vertex">
-        </div>
-      </div>
-      <small class="chatlog-setting-help">Vertex Express 이미지 키가 속한 Google Cloud 프로젝트 ID와 리전을 함께 사용합니다.</small>
-
-      <div class="chatlog-setting-field">
-        <label for="chatlog-image-key">이미지 API 키</label>
-        <div class="chatlog-setting-control">
-          <input id="chatlog-image-key" type="password" class="text_pole" placeholder="저장된 키를 바꿀 때만 입력">
-        </div>
-      </div>
-
-      <div id="chatlog-vertex-fields">
-        <div class="chatlog-setting-field">
-          <label for="chatlog-image-project">프로젝트 ID</label>
-          <div class="chatlog-setting-control">
-            <input id="chatlog-image-project" type="text" class="text_pole" placeholder="Google Cloud 프로젝트 ID">
-          </div>
-        </div>
-        <div class="chatlog-setting-field">
-          <label for="chatlog-image-region">리전</label>
-          <div class="chatlog-setting-control">
-            <input id="chatlog-image-region" type="text" class="text_pole" placeholder="global">
-          </div>
-        </div>
-        <small class="chatlog-setting-help">보통 리전은 global입니다. 이미지 API 키를 만든 프로젝트 ID를 입력하세요.</small>
-      </div>
-
-      <div class="chatlog-setting-field">
-        <label for="chatlog-image-model">이미지 모델</label>
+        <label for="chatlog-image-profile">이미지 연결 프로필</label>
         <div class="chatlog-setting-control chatlog-control-row">
-          <select id="chatlog-image-model" class="text_pole">
-            <option value="gemini-3.1-flash-lite-image">나노바나나 2 Lite — 빠름 (권장)</option>
-            <option value="gemini-3.1-flash-image">나노바나나 2 — 균형</option>
-            <option value="gemini-3-pro-image">나노바나나 Pro — 고화질</option>
-            <option value="gemini-2.5-flash-image">나노바나나 (구버전)</option>
-            <option value="__custom">직접 입력...</option>
-          </select>
+          <select id="chatlog-image-profile" class="text_pole"></select>
+          <button id="chatlog-image-profile-refresh" type="button" class="menu_button chatlog-icon-button fa-solid fa-rotate" title="목록 새로고침"></button>
           <button id="chatlog-test-image" type="button" class="menu_button chatlog-mini-button">테스트</button>
         </div>
       </div>
-      <div class="chatlog-setting-field chatlog-custom-model-field">
-        <span class="chatlog-setting-label">직접 입력</span>
-        <div class="chatlog-setting-control">
-          <input id="chatlog-image-model-custom" type="text" class="text_pole" style="display:none" placeholder="모델 ID">
-        </div>
-      </div>
+      <small class="chatlog-setting-help">선택한 ST 프로필의 이미지 모델·키·프로젝트 ID·리전을 자동으로 사용합니다. 프로필에서 키를 바꾸면 챗로그에도 바로 반영됩니다.</small>
+      <small id="chatlog-image-profile-info" class="chatlog-setting-help"></small>
       <small id="chatlog-test-result" class="chatlog-setting-help"></small>
 
       <div class="chatlog-setting-section">게시 일정</div>
@@ -451,6 +410,7 @@ function getActiveConnectionProfile() {
 
 // 서버에 저장된 프로필 이름. 목록 로딩이 늦어도 이 값은 안 잃는다.
 let savedProfileName = '';
+let savedImageProfileName = '';
 
 function refreshProfileSelect(selected) {
     const profiles = getProfiles();
@@ -472,11 +432,60 @@ function refreshProfileSelect(selected) {
     return profiles;
 }
 
+function profileModel(profile) {
+    return String(profile?.model || '');
+}
+
+function isImageProfile(profile) {
+    return /(?:image|imagen|nano)/i.test(profileModel(profile));
+}
+
+function refreshImageProfileSelect(selected) {
+    const profiles = getProfiles();
+    const $sel = $('#chatlog-image-profile');
+
+    if (selected !== undefined) savedImageProfileName = selected || '';
+    let keep = selected !== undefined
+        ? savedImageProfileName
+        : ($sel.val() || savedImageProfileName);
+    if (!keep) keep = profiles.find(isImageProfile)?.name || '';
+
+    $sel.empty().append('<option value="">-- 이미지 프로필 선택 --</option>');
+    profiles.forEach(profile => {
+        const model = profileModel(profile);
+        const suffix = model ? ` · ${model}` : '';
+        $sel.append($('<option>').val(profile.name).text(`${profile.name}${suffix}`));
+    });
+
+    if (keep && !profiles.some(profile => profile.name === keep)) {
+        $sel.append($('<option>').val(keep).text(`${keep} (목록 로딩 대기)`));
+    }
+    if (keep) $sel.val(keep);
+    savedImageProfileName = keep;
+    updateImageProfileInfo();
+    return profiles;
+}
+
+function updateImageProfileInfo() {
+    const name = $('#chatlog-image-profile').val();
+    const profile = getProfiles().find(item => item.name === name);
+    if (!name) {
+        $('#chatlog-image-profile-info').text('나노바나나 이미지 모델이 설정된 ST 연결 프로필을 골라주세요.');
+        return;
+    }
+    if (!profile) {
+        $('#chatlog-image-profile-info').text(`${name} 프로필 정보를 불러오는 중입니다.`);
+        return;
+    }
+    const model = profileModel(profile) || '모델 미지정';
+    const warning = isImageProfile(profile) ? '' : ' · ⚠ 이미지 모델인지 확인 필요';
+    $('#chatlog-image-profile-info').text(`${profile.name} · ${model}${warning}`);
+}
+
 const FALLBACK_SETTINGS = {
-    profileName: '', imageApiKey: '', imageModel: 'gemini-3.1-flash-lite-image',
+    profileName: '', imageProfileName: '',
     commentDelayMinMin: 1, commentDelayMaxMin: 30,
     autoCleanup: false, cleanupAfterDays: 1, keepSaved: true,
-    imageProvider: 'vertex', imageProjectId: '', imageRegion: 'global',
     textMode: 'profile',
     followActiveProfile: true,
     characterCommentChance: 30,
@@ -500,30 +509,6 @@ async function syncActiveConnectionProfile(profileName = null) {
     } catch (e) {
         console.warn('[chatlog] 활성 연결 프로필 동기화 실패', e);
     }
-}
-
-function toggleVertexFields() {
-    // Vertex Express도 projects/{projectId}/locations/{region} 경로를 사용한다.
-    $('#chatlog-vertex-fields').show();
-}
-
-function setImageModel(value) {
-    const $sel = $('#chatlog-image-model');
-    const known = $sel.find('option').map((_, o) => o.value).get();
-    const custom = !!value && !known.includes(value);
-    if (custom) {
-        $sel.val('__custom');
-        $('#chatlog-image-model-custom').val(value);
-    } else {
-        $sel.val(value || 'gemini-3.1-flash-lite-image');
-    }
-    $('.chatlog-custom-model-field').toggle(custom);
-    $('#chatlog-image-model-custom').toggle(custom);
-}
-
-function readImageModel() {
-    const v = $('#chatlog-image-model').val();
-    return v === '__custom' ? $('#chatlog-image-model-custom').val().trim() : v;
 }
 
 function statusTime(timestamp) {
@@ -581,16 +566,7 @@ async function loadSettingsUi() {
         }
     }
 
-    if (s.imageApiKey) {
-        $('#chatlog-image-key').val('').attr('placeholder', '저장돼 있음 — 바꿀 때만 입력');
-    } else {
-        $('#chatlog-image-key').val('').attr('placeholder', '이미지 전용 키');
-    }
-    setImageModel(s.imageModel);
-    $('#chatlog-image-provider').val('vertex');
-    $('#chatlog-image-project').val(s.imageProjectId || '');
-    $('#chatlog-image-region').val(s.imageRegion || 'global');
-    toggleVertexFields();
+    refreshImageProfileSelect(s.imageProfileName);
     $('#chatlog-textmode').val('profile');
     toggleTextMode();
     $('#chatlog-delay-min').val(s.commentDelayMinMin);
@@ -634,15 +610,10 @@ async function saveSettingsUi() {
     };
     localStorage.setItem('chatlog_schedule', JSON.stringify(defaultSchedule));
 
-    const typedKey = $('#chatlog-image-key').val().trim();
     await api('/settings', {
         profileName: $('#chatlog-profile').val(),
+        imageProfileName: $('#chatlog-image-profile').val(),
         followActiveProfile: $('#chatlog-follow-profile').is(':checked'),
-        ...(typedKey ? { imageApiKey: typedKey } : {}),
-        imageModel: readImageModel(),
-        imageProvider: $('#chatlog-image-provider').val(),
-        imageProjectId: $('#chatlog-image-project').val().trim(),
-        imageRegion: $('#chatlog-image-region').val().trim() || 'global',
         textMode: 'profile',
         commentDelayMinMin: Number($('#chatlog-delay-min').val()),
         commentDelayMaxMin: Number($('#chatlog-delay-max').val()),
@@ -2138,25 +2109,20 @@ jQuery(async () => {
     $('#chatlog-open').on('click', openChatlog);
     $('#chatlog-profile-refresh').on('click', () => {
         const n = refreshProfileSelect().length;
+        refreshImageProfileSelect();
+        toastr?.info?.(n ? `연결 프로필 ${n}개` : '연결 프로필을 못 찾았어요');
+    });
+    $('#chatlog-image-profile-refresh').on('click', () => {
+        const n = refreshImageProfileSelect().length;
         toastr?.info?.(n ? `연결 프로필 ${n}개` : '연결 프로필을 못 찾았어요');
     });
     $('#chatlog-textmode').on('change', toggleTextMode);
-    $('#chatlog-image-provider').on('change', toggleVertexFields);
-    $('#chatlog-image-model').on('change', function () {
-        const custom = this.value === '__custom';
-        $('.chatlog-custom-model-field').toggle(custom);
-        $('#chatlog-image-model-custom').toggle(custom);
-    });
+    $('#chatlog-image-profile').on('change', updateImageProfileInfo);
     $('#chatlog-test-image').on('click', async () => {
         const $r = $('#chatlog-test-result').text('생성 중...');
         try {
-            const k = $('#chatlog-image-key').val().trim();
             await api('/settings', {
-                ...(k ? { imageApiKey: k } : {}),
-                imageModel: readImageModel(),
-                imageProvider: $('#chatlog-image-provider').val(),
-                imageProjectId: $('#chatlog-image-project').val().trim(),
-                imageRegion: $('#chatlog-image-region').val().trim() || 'global',
+                imageProfileName: $('#chatlog-image-profile').val(),
             });
             const r = await api('/test/image', {});
             $r.html(`성공 — <a href="${r.path}" target="_blank">이미지 보기</a>`);
@@ -2179,6 +2145,7 @@ jQuery(async () => {
     $(document).on('click', '.chatlog-settings .inline-drawer-toggle', () => setTimeout(() => {
         if ($('#chatlog-follow-profile').is(':checked')) syncActiveConnectionProfile();
         else refreshProfileSelect();
+        refreshImageProfileSelect();
         loadRuntimeStatus();
     }, 50));
     $('#chatlog-follow-profile').on('change', function () {
@@ -2194,6 +2161,7 @@ jQuery(async () => {
     if (c0.eventSource && c0.eventTypes?.APP_READY) {
         c0.eventSource.on(c0.eventTypes.APP_READY, () => {
             refreshProfileSelect();
+            refreshImageProfileSelect();
             ensureQuickOpenButton();
             refreshQuickBadge();
         });
@@ -2208,6 +2176,7 @@ jQuery(async () => {
         if (!getProfiles().length) return;
         if ($('#chatlog-follow-profile').is(':checked')) syncActiveConnectionProfile();
         else refreshProfileSelect();
+        refreshImageProfileSelect();
     }, ms));
     setInterval(ensureQuickOpenButton, 5000);
     setInterval(refreshQuickBadge, 30000);

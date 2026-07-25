@@ -1,6 +1,6 @@
 /**
  * 챗로그 — AI 호출 모듈
- * 서버에서 연결 프로필을 해석해 텍스트 생성, 이미지는 별도 키로 생성.
+ * 서버에서 SillyTavern 연결 프로필을 해석해 텍스트와 이미지를 생성.
  */
 
 const fs = require('fs');
@@ -39,17 +39,37 @@ function parseServiceAccount(value) {
     }
 }
 
-// ── 연결 프로필 해석 ──────────────────────────────────────
-function resolveTextApi(settings) {
-    // 텍스트는 반드시 ST 연결 프로필에서 해석한다.
-    // 이미지 전용 Express 키는 이 함수에서 절대 읽지 않는다.
+function vertexEndpointConfig(profile, oaiSettings) {
+    const candidates = [
+        profile?.['api-url'],
+        profile?.['custom-url'],
+        profile?.endpoint,
+        oaiSettings?.vertexai_endpoint,
+        oaiSettings?.vertexai_api_url,
+    ].filter(Boolean).map(String);
+    for (const value of candidates) {
+        const match = value.match(/\/projects\/([^/]+)\/locations\/([^/]+)/i);
+        if (match) {
+            return {
+                projectId: decodeURIComponent(match[1]),
+                region: decodeURIComponent(match[2]),
+            };
+        }
+    }
+    return {};
+}
 
+// ── 연결 프로필 해석 ──────────────────────────────────────
+function resolveProfileApi(settings, profileName, kind = 'text') {
     const userDir = path.join(ST_ROOT, 'data', settings.userHandle || 'default-user');
     const stSettings = loadJson(path.join(userDir, 'settings.json'), {});
     const secrets = loadJson(path.join(userDir, 'secrets.json'), {});
 
     const profiles = stSettings?.extension_settings?.connectionManager?.profiles || [];
-    const profile = profiles.find(p => p.name === settings.profileName) || profiles[0];
+    const profile = profiles.find(p => p.name === profileName)
+        || (!profileName && kind === 'image'
+            ? profiles.find(p => /(?:image|imagen|nano)/i.test(String(p?.model || '')))
+            : null);
     if (!profile) return null;
 
     const source = profile['api-source'] || profile.api || 'openai';
@@ -57,6 +77,7 @@ function resolveTextApi(settings) {
     const oaiSettings = stSettings?.oai_settings || stSettings?.openai_settings || {};
 
     if (source === 'vertexai') {
+        const endpoint = vertexEndpointConfig(profile, oaiSettings);
         const exactServiceAccount = parseServiceAccount(secretValue(
             secrets,
             'vertexai_service_account_json',
@@ -89,12 +110,25 @@ function resolveTextApi(settings) {
             apiKey: authMode === 'express' ? expressKey : '',
             projectId: serviceAccount?.project_id
                 || profile.vertexai_project
+                || profile.vertexai_project_id
+                || profile.projectId
+                || profile.project_id
                 || profile['project-id']
+                || endpoint.projectId
                 || oaiSettings.vertexai_express_project_id
+                || oaiSettings.vertexai_project_id
+                || oaiSettings.vertexai_project
                 || '',
             region: profile.vertexai_region
-                || profile['api-url']
+                || profile.vertexai_location
+                || profile.region
+                || profile.location
+                || endpoint.region
+                || (/^[a-z]+(?:-[a-z0-9]+)+\d$|^global$/i.test(String(profile['api-url'] || ''))
+                    ? profile['api-url']
+                    : '')
                 || oaiSettings.vertexai_region
+                || oaiSettings.vertexai_location
                 || 'global',
             secretId,
         };
@@ -108,6 +142,43 @@ function resolveTextApi(settings) {
         customUrl: profile['api-url'] || profile['custom-url'] || profile.reverse_proxy || '',
         secretId,
     };
+}
+
+function resolveTextApi(settings) {
+    // 텍스트는 반드시 사용자가 고른 ST 연결 프로필에서 해석한다.
+    return resolveProfileApi(settings, settings.profileName);
+}
+
+function resolveImageApi(settings) {
+    // 이미지는 이미지용 ST 연결 프로필을 매 호출마다 다시 읽는다.
+    // 같은 프로필에서 키를 교체하면 챗로그 설정을 다시 저장할 필요가 없다.
+    const api = resolveProfileApi(
+        settings,
+        settings.imageProfileName,
+        'image',
+    );
+    if (!api) {
+        throw new Error('이미지 연결 프로필을 찾을 수 없습니다');
+    }
+    if (api.source !== 'vertexai') {
+        throw new Error(`이미지 연결 프로필은 Vertex AI여야 합니다 (${api.source})`);
+    }
+    if (!api.model) {
+        throw new Error('이미지 연결 프로필의 모델을 찾을 수 없습니다');
+    }
+    if (!/(?:image|imagen|nano)/i.test(api.model)) {
+        throw new Error(`이미지 연결 프로필의 모델이 이미지 모델이 아닙니다 (${api.model})`);
+    }
+    if (!api.projectId) {
+        throw new Error(`이미지 연결 프로필 "${api.name}"의 프로젝트 ID를 찾을 수 없습니다`);
+    }
+    if (api.authMode === 'express' && !api.apiKey) {
+        throw new Error(`이미지 연결 프로필 "${api.name}"의 Express 키를 찾을 수 없습니다`);
+    }
+    if (api.authMode === 'full' && !api.serviceAccount) {
+        throw new Error(`이미지 연결 프로필 "${api.name}"의 서비스 계정 정보를 찾을 수 없습니다`);
+    }
+    return api;
 }
 
 function imageMime(file) {
@@ -1259,7 +1330,7 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
     }
 
     let image = null;
-    if (parsed.scene && settings.imageApiKey) {
+    if (parsed.scene) {
         try {
             const references = everydayPhoto
                 ? []
@@ -1343,7 +1414,7 @@ function normalizeReferences(references) {
         .filter(reference => reference?.image?.data);
 }
 
-async function requestGeneratedImage(settings, prompt, references = []) {
+async function requestGeneratedImage(api, prompt, references = []) {
     const parts = [{ text: prompt }];
     for (const [index, reference] of normalizeReferences(references).entries()) {
         parts.push({
@@ -1356,12 +1427,7 @@ async function requestGeneratedImage(settings, prompt, references = []) {
             },
         });
     }
-    return callGoogle({
-        model: settings.imageModel,
-        apiKey: settings.imageApiKey,
-        projectId: settings.imageProjectId,
-        region: settings.imageRegion || 'global',
-    }, {
+    return callVertexProfile(api, {
         contents: [{ role: 'user', parts }],
         generationConfig: {
             responseModalities: ['Image'],
@@ -1380,7 +1446,7 @@ async function generateImage(
     temporalContext = '',
     photoMode = 'selfie',
 ) {
-    if (!settings.imageApiKey) throw new Error('이미지 API 키가 비어 있습니다');
+    const imageApi = resolveImageApi(settings);
 
     const usableReferences = normalizeReferences(references);
     const posterName = member?.name || 'the posting character';
@@ -1424,7 +1490,7 @@ async function generateImage(
     const failures = [];
     for (const attempt of attempts) {
         try {
-            const json = await requestGeneratedImage(settings, attempt.prompt, attempt.references);
+            const json = await requestGeneratedImage(imageApi, attempt.prompt, attempt.references);
             inline = findGeneratedImage(json);
             if (inline) break;
             const summary = imageResponseSummary(json);
@@ -1448,7 +1514,9 @@ async function generateImage(
 }
 
 module.exports = {
+    resolveProfileApi,
     resolveTextApi,
+    resolveImageApi,
     googleUrl,
     callGoogle,
     getVertexAccessToken,
