@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.7.11';
+const CHATLOG_VERSION = '0.7.13';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -151,6 +151,30 @@ function personaForMember(room, member) {
     return stored || linkedPersonaForMember(member) || personaForRoom(room);
 }
 
+function relationshipContextForRoom(room) {
+    const actor = personaForRoom(room);
+    const graph = room?.relationshipGraph;
+    const lines = [
+        '[단톡 공통 관계도]',
+        `현재 user로 글과 댓글을 쓰는 실제 인물: ${actor.name}`,
+        '- 이 인물을 캐릭터별 개인 연결 페르소나로 바꾸지 않는다.',
+    ];
+    if (graph?.status !== 'ready') {
+        lines.push('- 저장된 관계 분석이 없으므로 명시되지 않은 관계를 만들지 않는다.');
+        return lines.join('\n');
+    }
+    for (const relation of graph.memberRelations || []) {
+        if (relation.confidence !== 'explicit' || relation.type === 'unknown') continue;
+        lines.push(`- ${actor.name} ↔ ${relation.memberName}: ${relation.label}`);
+    }
+    for (const relation of graph.characterRelations || []) {
+        if (relation.confidence !== 'explicit' || relation.type === 'unknown') continue;
+        lines.push(`- ${relation.aName} ↔ ${relation.bName}: ${relation.label}`);
+    }
+    if (graph.summary) lines.push(`- 공통 요약: ${graph.summary}`);
+    return lines.join('\n');
+}
+
 function userAvatarUrl(room) {
     const p = personaForRoom(room);
     if (p.file) return `/User Avatars/${encodeURIComponent(p.file)}`;
@@ -203,7 +227,8 @@ async function syncRoomCharacterCards() {
         }
         if (!Object.keys(patch).length) continue;
         Object.assign(room, patch);
-        await api('/room/update', { roomId: room.id, ...patch });
+        const updated = await api('/room/update', { roomId: room.id, ...patch });
+        Object.assign(room, updated);
     }
 }
 
@@ -941,12 +966,17 @@ function renderFeed() {
     const di = days.indexOf(f.day);
     const dateLabel = dateFromDayKey(f.day)
         .toLocaleDateString('ko-KR', { month: 'long', day: 'numeric', weekday: 'short' });
+    const relationshipReady = room.relationshipGraph?.status === 'ready';
+    const relationshipTitle = relationshipReady
+        ? `단톡 관계 새로고침${room.relationshipGraph.summary ? ` · ${room.relationshipGraph.summary}` : ''}`
+        : '단톡 관계 새로고침 필요';
     const $top = $(`
       <div class="chatlog-slotbar">
         <span class="chatlog-nav prev fa-solid fa-chevron-left${di <= 0 ? ' off' : ''}"></span>
         <span class="chatlog-date">${dateLabel}</span>
         <span class="chatlog-nav next fa-solid fa-chevron-right${di >= days.length - 1 ? ' off' : ''}"></span>
         <span class="chatlog-slotbtn persona fa-solid fa-user-pen" title="표시 페르소나 변경"></span>
+        <span class="chatlog-slotbtn relationships fa-solid fa-arrows-rotate${relationshipReady ? '' : ' stale'}" title="${esc(relationshipTitle)}"></span>
         <span class="chatlog-slotbtn upload fa-solid fa-camera" title="올리기"></span>
         <span class="chatlog-slotbtn daylog fa-solid fa-clapperboard" title="하루로그"></span>
       </div>`);
@@ -965,6 +995,7 @@ function renderFeed() {
         }
     });
     $top.find('.persona').on('click', () => changeRoomDisplayPersona(room));
+    $top.find('.relationships').on('click', event => refreshRoomRelationships(room, event.currentTarget));
     $top.find('.upload').on('click', () => uploadSheet(room));
     $top.find('.daylog').on('click', () => dayLogView(room, f.day));
     $b.append($top);
@@ -1467,8 +1498,46 @@ async function changeRoomDisplayPersona(room) {
     };
     await api('/room/update', { roomId: room.id, persona: snapshot });
     room.persona = snapshot;
-    toastr?.success?.(`${persona.name}(으)로 표시합니다.`);
+    room.relationshipGraph = {
+        ...(room.relationshipGraph || {}),
+        status: 'stale',
+        displayPersona: { name: snapshot.name, avatar: snapshot.avatar },
+    };
+    toastr?.success?.(`${persona.name}(으)로 표시합니다. 관계 새로고침을 눌러 관계를 다시 정리해 주세요.`);
     render();
+}
+
+async function refreshRoomRelationships(room, button = null, options = {}) {
+    const $button = button ? $(button) : null;
+    if ($button?.hasClass('busy')) return null;
+    $button?.addClass('busy');
+    if (!options.silent) toastr?.info?.('캐릭터 카드와 최근 채팅에서 단톡 관계를 분석하고 있어요.');
+    try {
+        const result = await api('/room/relationships/refresh', { roomId: room.id });
+        if (result.room) {
+            state.rooms[room.id] = result.room;
+            room = result.room;
+        } else if (result.relationshipGraph) {
+            room.relationshipGraph = result.relationshipGraph;
+        }
+        const summary = room.relationshipGraph?.summary
+            ? ` ${room.relationshipGraph.summary.slice(0, 180)}`
+            : '';
+        toastr?.success?.(`단톡 관계를 저장했어요.${summary}`);
+        render();
+        return room.relationshipGraph;
+    } catch (error) {
+        room.relationshipGraph = {
+            ...(room.relationshipGraph || {}),
+            status: 'error',
+            lastError: error.message,
+        };
+        toastr?.error?.(error.message);
+        render();
+        return null;
+    } finally {
+        $button?.removeClass('busy');
+    }
 }
 
 async function createRoomFlow() {
@@ -1502,7 +1571,7 @@ async function createRoomFlow() {
     const persona = await chooseDisplayPersona(c, members);
     if (!persona) return;
     const memberPersonas = memberPersonasForMembers(members);
-    await api('/room', {
+    const room = await api('/room', {
         name,
         members,
         schedule: defaultSchedule,
@@ -1513,7 +1582,10 @@ async function createRoomFlow() {
         },
         memberPersonas,
     });
-    refresh();
+    state.rooms[room.id] = room;
+    toastr?.info?.('단톡을 만들었어요. 처음 한 번 관계를 분석합니다.');
+    await refreshRoomRelationships(room, null, { silent: true });
+    await refresh();
 }
 
 async function markRead(roomId) {
@@ -1584,8 +1656,8 @@ function buildCommentMessages(job) {
     const m = job.member || {};
     const p = job.post || {};
     const room = state.rooms[job.roomId];
-    const relationshipPersona = room ? personaForMember(room, m) : null;
-    const userName = relationshipPersona?.name || '유저';
+    const actorPersona = room ? personaForRoom(room) : null;
+    const userName = actorPersona?.name || '유저';
     const isOwnPost = p.author === m.avatar;
     const authorName = p.author === 'user' ? userName : characterName(room, p.author, p.authorName);
     const targetUserComment = job.replyToCommentId
@@ -1598,8 +1670,9 @@ function buildCommentMessages(job) {
         m.description ? `설명: ${m.description}` : '',
         m.personality ? `성격: ${m.personality}` : '',
         m.mesExample ? `말투 예시:\n${m.mesExample}` : '',
-        relationshipPersona?.description
-            ? `연결된 유저 페르소나: ${userName}\n${relationshipPersona.description}`
+        room ? relationshipContextForRoom(room) : '',
+        actorPersona?.description
+            ? `현재 단톡에서 실제로 행동한 표시 페르소나: ${userName}\n${actorPersona.description}`
             : '',
         '',
         isReply

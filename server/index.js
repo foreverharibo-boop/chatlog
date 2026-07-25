@@ -85,13 +85,29 @@ function loadAll() {
     db.runtime.skippedMissedSlots ??= 0;
     for (const job of db.jobs) job.attempts ??= 0;
     settings = { ...settings, ...loadJson(SETTINGS_PATH, {}) };
-    // v0.7.11: 텍스트는 ST 프로필, 이미지는 별도 Vertex Express 설정만 사용한다.
+    // v0.7.12: 텍스트는 ST 프로필, 이미지는 별도 Vertex Express 설정만 사용한다.
     settings.textMode = 'profile';
     settings.imageProvider = 'vertex';
 
     for (const room of Object.values(db.rooms)) {
         room.slotHistory ??= [];
         room.memberPersonas ??= {};
+        room.relationshipGraph ??= {
+            version: 1,
+            status: 'stale',
+            generatedAt: null,
+            displayPersona: room.persona
+                ? { name: room.persona.name || '유저', avatar: room.persona.avatar || null }
+                : null,
+            memberRelations: [],
+            characterRelations: [],
+            summary: '',
+            lastError: null,
+        };
+        if (room.relationshipGraph.status === 'building'
+            || room.relationshipGraph.status === 'pending') {
+            room.relationshipGraph.status = 'stale';
+        }
         room.schedule ??= {};
         room.schedule.maxSilenceHours ??= 12;
     }
@@ -273,6 +289,18 @@ function enqueueEngagement(room, post) {
 
 const findPost = (roomId, postId) => (db.posts[roomId] || []).find(p => p.id === postId);
 const findMember = (room, avatar) => room.members.find(m => m.avatar === avatar);
+function hasCharacterPostInSlot(roomId, charId, slotAt) {
+    const key = ai.hourSlotKey(slotAt);
+    return (db.posts[roomId] || []).some(post => post.author === charId
+        && ai.hourSlotKey(post.slotAt ?? post.createdAt) === key);
+}
+function hasQueuedCharacterCut(roomId, charId, slotAt) {
+    const key = ai.hourSlotKey(slotAt);
+    return db.jobs.some(job => job.type === 'cut'
+        && job.roomId === roomId
+        && job.charId === charId
+        && ai.hourSlotKey(job.slotAt) === key);
+}
 
 async function runJob(job) {
     const room = db.rooms[job.roomId];
@@ -352,6 +380,9 @@ async function runJob(job) {
     if (job.type === 'cut') {
         const member = findMember(room, job.charId);
         if (!member) return;
+        if (hasCharacterPostInSlot(room.id, member.avatar, job.slotAt)) {
+            return { status: 'duplicate-skipped' };
+        }
         const previous = (db.posts[room.id] || [])
             .filter(post => post.author === member.avatar)
             .sort((a, b) => (b.slotAt ?? b.createdAt) - (a.slotAt ?? a.createdAt))[0];
@@ -362,19 +393,32 @@ async function runJob(job) {
         );
         const forcePost = !!job.forcePost
             || activeHoursBetween(lastPostAt, job.slotAt, room.schedule) >= maxSilenceHours;
+        const recentPhotoModes = (db.posts[room.id] || [])
+            .filter(post => post.author === member.avatar && post.photoMode)
+            .sort((a, b) => (b.slotAt ?? b.createdAt) - (a.slotAt ?? a.createdAt))
+            .map(post => post.photoMode);
+        const photoDecision = ai.choosePhotoMode(
+            member,
+            Math.floor(rand(0, 100)),
+            recentPhotoModes,
+        );
         const result = await ai.generateCharacterCut(settings, room, member, job.slotAt, {
             forcePost,
             randomRoll: Math.floor(rand(0, 100)),
             activeHoursSinceLastPost: activeHoursBetween(lastPostAt, job.slotAt, room.schedule),
             maxSilenceHours,
+            ...photoDecision,
         });
         if (result.skipped) return { status: 'skipped' };
-        const { text, image } = result;
+        if (hasCharacterPostInSlot(room.id, member.avatar, job.slotAt)) {
+            return { status: 'duplicate-skipped' };
+        }
+        const { text, image, photoMode } = result;
         const post = {
             id: uid('post'), roomId: room.id, author: job.charId,
             authorName: member.name,
             slotAt: job.slotAt, createdAt: Date.now(),
-            text, image, imageSource: 'generated',
+            text, image, imageSource: 'generated', photoMode,
             read: false, comments: [], reactions: [],
         };
         (db.posts[room.id] ??= []).push(post);
@@ -542,6 +586,8 @@ async function tick() {
             const slotAt = room.nextSlotAt;
             recordSlot(room, slotAt);
             for (const member of room.members) {
+                if (hasCharacterPostInSlot(room.id, member.avatar, slotAt)
+                    || hasQueuedCharacterCut(room.id, member.avatar, slotAt)) continue;
                 db.jobs.push({
                     id: uid('job'), type: 'cut', roomId: room.id, charId: member.avatar, slotAt,
                     attempts: 0,
@@ -609,6 +655,18 @@ async function init(router) {
             id: uid('room'), name, members: normalizedMembers, persona, memberPersonas,
             createdAt: Date.now(), paused: false,
             slotHistory: [],
+            relationshipGraph: {
+                version: 1,
+                status: 'pending',
+                generatedAt: null,
+                displayPersona: persona
+                    ? { name: persona.name || '유저', avatar: persona.avatar || null }
+                    : null,
+                memberRelations: [],
+                characterRelations: [],
+                summary: '',
+                lastError: null,
+            },
             schedule: {
                 activeFrom: schedule.activeFrom ?? 8,
                 activeTo: schedule.activeTo ?? 24,
@@ -628,6 +686,18 @@ async function init(router) {
         const { roomId, ...patch } = req.body || {};
         const room = db.rooms[roomId];
         if (!room) return res.status(404).json({ error: 'room not found' });
+        const identityBefore = JSON.stringify({
+            persona: room.persona || null,
+            memberPersonas: room.memberPersonas || {},
+            members: (room.members || []).map(member => ({
+                avatar: member.avatar,
+                name: member.name,
+                description: member.description || '',
+                personality: member.personality || '',
+                scenario: member.scenario || '',
+                mesExample: member.mesExample || '',
+            })),
+        });
         if (patch.members) {
             patch.members = patch.members.map(member => ({
                 ...member,
@@ -635,9 +705,69 @@ async function init(router) {
             }));
         }
         Object.assign(room, patch);
+        const identityAfter = JSON.stringify({
+            persona: room.persona || null,
+            memberPersonas: room.memberPersonas || {},
+            members: (room.members || []).map(member => ({
+                avatar: member.avatar,
+                name: member.name,
+                description: member.description || '',
+                personality: member.personality || '',
+                scenario: member.scenario || '',
+                mesExample: member.mesExample || '',
+            })),
+        });
+        if (identityBefore !== identityAfter) {
+            room.relationshipGraph = {
+                ...(room.relationshipGraph || {}),
+                version: 1,
+                status: 'stale',
+                displayPersona: room.persona
+                    ? { name: room.persona.name || '유저', avatar: room.persona.avatar || null }
+                    : null,
+                lastError: null,
+            };
+        }
         if (patch.schedule) room.nextSlotAt = computeNextSlot(room);
         saveDb();
         res.json(room);
+    });
+
+    router.post('/room/relationships/refresh', async (req, res) => {
+        const { roomId } = req.body || {};
+        const room = db.rooms[roomId];
+        if (!room) return res.status(404).json({ error: 'room not found' });
+        if (room.relationshipGraph?.status === 'building') {
+            return res.status(409).json({ error: '이미 관계를 분석하고 있어요.' });
+        }
+
+        room.relationshipGraph = {
+            ...(room.relationshipGraph || {}),
+            version: 1,
+            status: 'building',
+            displayPersona: room.persona
+                ? { name: room.persona.name || '유저', avatar: room.persona.avatar || null }
+                : null,
+            lastError: null,
+        };
+        saveDb();
+
+        try {
+            room.relationshipGraph = await ai.analyzeRoomRelationships(settings, room);
+            saveDb();
+            res.json({ ok: true, room, relationshipGraph: room.relationshipGraph });
+        } catch (error) {
+            room.relationshipGraph = {
+                ...(room.relationshipGraph || {}),
+                version: 1,
+                status: 'error',
+                generatedAt: null,
+                lastError: String(error?.message || error).slice(0, 800),
+            };
+            saveDb();
+            console.error('[chatlog] 단톡 관계 분석 실패:', error);
+            res.status(500).json({ error: `관계 분석 실패: ${error.message}` });
+        }
     });
 
     router.post('/post', (req, res) => {
