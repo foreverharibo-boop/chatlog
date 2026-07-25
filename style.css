@@ -597,6 +597,24 @@ html > .chatlog-sheet * {
 .chatlog-settings small { display: block; opacity: 0.6; margin: 2px 0 8px; line-height: 1.35; }
 .chatlog-settings label { display: block; margin-top: 10px; font-weight: 600; }
 .chatlog-settings #chatlog-profile-refresh { flex: 0 0 auto; padding: 6px 10px; }
+.chatlog-runtime-status {
+    display: grid;
+    gap: 5px;
+    margin-top: 5px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 76%, transparent);
+    font-size: 0.82em;
+}
+.chatlog-runtime-status > div {
+    display: grid;
+    grid-template-columns: 88px minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+}
+.chatlog-runtime-status b { opacity: 0.68; }
+.chatlog-runtime-status span { min-width: 0; overflow-wrap: anywhere; }
+.chatlog-runtime-status .error { color: #e57373; }
 
 /* ══════════════════════════════════════════
    v0.6.0 — 실물 셋로그 슬롯 페이지
@@ -644,7 +662,7 @@ html > .chatlog-sheet * {
     cursor: pointer;
 }
 .chatlog-slotbtn:hover { background: #ebe8e2; }
-.chatlog-slotbtn.upload { margin-left: auto; }
+.chatlog-slotbtn.persona { margin-left: auto; }
 
 /* 시간대 탭 */
 .chatlog-dots {

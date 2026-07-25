@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.7.0';
+const CHATLOG_VERSION = '0.7.2';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -255,6 +255,7 @@ const SETTINGS_HTML = `
         <option value="vertex">Vertex AI (Express 모드)</option>
         <option value="aistudio">Google AI Studio</option>
       </select>
+      <small>Vertex Express 모드는 프로젝트 ID·리전 없이 Express API 키만 사용합니다.</small>
 
       <label for="chatlog-image-key">이미지 생성 API 키</label>
       <input id="chatlog-image-key" type="password" class="text_pole" placeholder="이미지 전용 키">
@@ -312,6 +313,17 @@ const SETTINGS_HTML = `
         <input id="chatlog-delay-min" type="number" min="0" max="600" class="text_pole">
         <span>~</span>
         <input id="chatlog-delay-max" type="number" min="1" max="600" class="text_pole">
+      </div>
+
+      <label for="chatlog-char-comment-chance">캐릭터끼리 댓글 달 확률 (%)</label>
+      <input id="chatlog-char-comment-chance" type="number" min="0" max="100" class="text_pole">
+      <small>캐릭터 게시물에는 항상 이모지 반응을 남기고, 이 확률로 댓글도 답니다.</small>
+
+      <hr>
+      <label>자동 실행 상태</label>
+      <div id="chatlog-runtime-status" class="chatlog-runtime-status">불러오는 중...</div>
+      <div class="chatlog-row">
+        <div id="chatlog-status-refresh" class="menu_button">상태 새로고침</div>
       </div>
 
       <hr>
@@ -389,6 +401,7 @@ const FALLBACK_SETTINGS = {
     imageProvider: 'vertex', imageProjectId: '', imageRegion: 'global',
     textMode: 'express', textModel: 'gemini-2.5-flash',
     followActiveProfile: true,
+    characterCommentChance: 30,
 };
 
 function toggleTextMode() {
@@ -414,7 +427,9 @@ async function syncActiveConnectionProfile(profileName = null) {
 }
 
 function toggleVertexFields() {
-    $('#chatlog-vertex-fields').toggle($('#chatlog-image-provider').val() === 'vertex');
+    // v0.7.2부터 Vertex는 API 키 전용 Express 경로를 사용한다.
+    // 예전 설정값은 호환을 위해 보존하되 프로젝트/리전 입력칸은 표시하지 않는다.
+    $('#chatlog-vertex-fields').hide();
 }
 
 function setImageModel(value) {
@@ -432,6 +447,32 @@ function setImageModel(value) {
 function readImageModel() {
     const v = $('#chatlog-image-model').val();
     return v === '__custom' ? $('#chatlog-image-model-custom').val().trim() : v;
+}
+
+function statusTime(timestamp) {
+    return timestamp
+        ? new Date(timestamp).toLocaleString('ko-KR', { hour12: false })
+        : '아직 없음';
+}
+
+async function loadRuntimeStatus() {
+    const $status = $('#chatlog-runtime-status');
+    if (!$status.length) return;
+    try {
+        const status = await api('/status');
+        $status.html([
+            `<div><b>다음 판단</b><span>${esc(statusTime(status.nextSlotAt))}</span></div>`,
+            `<div><b>마지막 성공</b><span>${esc(statusTime(status.lastSuccessAt))}${status.lastSuccess ? ` · ${esc(status.lastSuccess)}` : ''}</span></div>`,
+            `<div><b>마지막 오류</b><span class="${status.lastError ? 'error' : ''}">${status.lastError ? `${esc(statusTime(status.lastErrorAt))} · ${esc(status.lastError)}` : '없음'}</span></div>`,
+            status.lastNotice
+                ? `<div><b>최근 안내</b><span>${esc(status.lastNotice)}</span></div>`
+                : '',
+            `<div><b>작업 큐</b><span>대기 ${Number(status.pendingJobs || 0)}개 · 재시도 ${Number(status.retryingJobs || 0)}개</span></div>`,
+            `<div><b>건너뛴 밀린 슬롯</b><span>${Number(status.skippedMissedSlots || 0)}개</span></div>`,
+        ].filter(Boolean).join(''));
+    } catch (error) {
+        $status.html(`<div><b>상태 오류</b><span class="error">${esc(error.message)}</span></div>`);
+    }
 }
 
 async function loadSettingsUi() {
@@ -471,6 +512,7 @@ async function loadSettingsUi() {
     toggleTextMode();
     $('#chatlog-delay-min').val(s.commentDelayMinMin);
     $('#chatlog-delay-max').val(s.commentDelayMaxMin);
+    $('#chatlog-char-comment-chance').val(s.characterCommentChance ?? 30);
     $('#chatlog-autoclean').prop('checked', !!s.autoCleanup);
     $('#chatlog-cleandays').val(s.cleanupAfterDays);
     $('#chatlog-keepsaved').prop('checked', !!s.keepSaved);
@@ -485,6 +527,7 @@ async function loadSettingsUi() {
     $('#chatlog-max-silence').val(defaultSchedule.maxSilenceHours);
     $('#chatlog-jitter').prop('checked', defaultSchedule.jitter);
     updateCostHint();
+    await loadRuntimeStatus();
 }
 
 function updateCostHint() {
@@ -521,6 +564,8 @@ async function saveSettingsUi() {
         textModel: $('#chatlog-text-model').val().trim() || 'gemini-2.5-flash',
         commentDelayMinMin: Number($('#chatlog-delay-min').val()),
         commentDelayMaxMin: Number($('#chatlog-delay-max').val()),
+        characterCommentChance: Math.max(0, Math.min(100,
+            Number($('#chatlog-char-comment-chance').val()) || 0)),
         userPersonaName: ctx().name1 || '',
         autoCleanup: $('#chatlog-autoclean').is(':checked'),
         cleanupAfterDays: Number($('#chatlog-cleandays').val()),
@@ -618,7 +663,7 @@ function renderRooms() {
 }
 
 // ── 피드: 슬롯 페이지 (실물 셋로그 구조) ──────────────────
-const REACT_EMOJIS = ['❤️', '😂', '😮', '🥹', '👍'];
+const REACT_EMOJIS = ['❤️', '😂', '🥹', '😮', '😢', '😡', '👏', '🔥', '👍', '👀'];
 
 const hhmm = (ts) => {
     const d = new Date(ts);
@@ -717,6 +762,7 @@ function renderFeed() {
         <span class="chatlog-nav prev fa-solid fa-chevron-left${di <= 0 ? ' off' : ''}"></span>
         <span class="chatlog-date">${dateLabel}</span>
         <span class="chatlog-nav next fa-solid fa-chevron-right${di >= days.length - 1 ? ' off' : ''}"></span>
+        <span class="chatlog-slotbtn persona fa-solid fa-user-pen" title="표시 페르소나 변경"></span>
         <span class="chatlog-slotbtn upload fa-solid fa-camera" title="올리기"></span>
         <span class="chatlog-slotbtn daylog fa-solid fa-clapperboard" title="하루로그"></span>
       </div>`);
@@ -734,6 +780,7 @@ function renderFeed() {
             render();
         }
     });
+    $top.find('.persona').on('click', () => changeRoomDisplayPersona(room));
     $top.find('.upload').on('click', () => uploadSheet(room));
     $top.find('.daylog').on('click', () => dayLogView(room));
     $b.append($top);
@@ -1114,15 +1161,25 @@ function dayLogView(room) {
 }
 
 // ── 방 만들기 ─────────────────────────────────────────────
-async function chooseDisplayPersona(c, members) {
-    let candidates = connectedPersonasForMembers(members);
-    if (!candidates.length) candidates = [activePersona()];
-
-    const active = activePersona();
-    const selectedIndex = Math.max(0, candidates.findIndex(persona => persona.file === active.file));
+async function chooseDisplayPersona(c, members, options = {}) {
+    const unique = new Map();
+    connectedPersonasForMembers(members).forEach(persona => {
+        unique.set(persona.file || persona.name, persona);
+    });
+    const initial = normalizePersona(options.initialPersona);
+    if (initial) unique.set(initial.file || initial.name, initial);
+    if (!unique.size) {
+        const active = activePersona();
+        unique.set(active.file || active.name, active);
+    }
+    const candidates = [...unique.values()];
+    const selectedIndex = Math.max(0, candidates.findIndex(persona =>
+        initial
+            ? persona.file === initial.file && persona.name === initial.name
+            : persona.file === activePersona().file));
     const $picker = $(`
       <div class="chatlog-personapick">
-        <div class="chatlog-picktitle">이 단톡에 표시할 페르소나</div>
+        <div class="chatlog-picktitle">${esc(options.title || '이 단톡에 표시할 페르소나')}</div>
         <div class="chatlog-pickhint">캐릭터별 관계는 각자 연결된 페르소나를 따로 참고해요.</div>
         <div class="chatlog-personagrid"></div>
       </div>`);
@@ -1147,12 +1204,30 @@ async function chooseDisplayPersona(c, members) {
     });
 
     const ok = await c.callGenericPopup?.($picker[0], c.POPUP_TYPE?.CONFIRM, '', {
-        okButton: '이 페르소나로 만들기',
+        okButton: options.okButton || '이 페르소나로 만들기',
         cancelButton: '취소',
     });
     if (!ok) return null;
     const index = Number($picker.find('input:checked').val());
     return candidates[index] || candidates[0];
+}
+
+async function changeRoomDisplayPersona(room) {
+    const persona = await chooseDisplayPersona(ctx(), room.members, {
+        initialPersona: room.persona,
+        title: '표시 페르소나 변경',
+        okButton: '변경',
+    });
+    if (!persona) return;
+    const snapshot = {
+        name: persona.name,
+        description: persona.description || '',
+        avatar: persona.file || null,
+    };
+    await api('/room/update', { roomId: room.id, persona: snapshot });
+    room.persona = snapshot;
+    toastr?.success?.(`${persona.name}(으)로 표시합니다.`);
+    render();
 }
 
 async function createRoomFlow() {
@@ -1233,7 +1308,7 @@ function profileByName(name) {
 }
 
 /** 조용히 한 번 생성. 실패하면 null. */
-async function quietGenerate(messages, maxTokens = 200) {
+async function quietGenerate(messages, maxTokens = 1024) {
     const svc = await getRequestService();
     const profileName = $('#chatlog-profile').val() || (await api('/settings')).profileName;
     const profile = profileByName(profileName);
@@ -1337,6 +1412,11 @@ async function runLocal(roomId = null) {
             ok++;
         } catch (e) {
             console.error('[chatlog] 댓글 생성 실패', job.charId, e);
+            try {
+                await api('/jobs/requeue', { job, error: e.message });
+            } catch (requeueError) {
+                console.error('[chatlog] 댓글 재시도 예약 실패', requeueError);
+            }
         }
         await delay(400);   // 연타 방지
     }
@@ -1604,6 +1684,7 @@ jQuery(async () => {
         try { await api('/reload', {}); toastr?.success?.('서버 코드 리로드 완료'); }
         catch (e) { toastr?.error?.('리로드 실패: ' + e.message); }
     });
+    $('#chatlog-status-refresh').on('click', loadRuntimeStatus);
     $('#chatlog-cleannow').on('click', async () => {
         if (!confirm('지난 기록을 지금 정리할까요?')) return;
         await api('/cleanup', { force: true });
@@ -1614,6 +1695,7 @@ jQuery(async () => {
     $(document).on('click', '.chatlog-settings .inline-drawer-toggle', () => setTimeout(() => {
         if ($('#chatlog-follow-profile').is(':checked')) syncActiveConnectionProfile();
         else refreshProfileSelect();
+        loadRuntimeStatus();
     }, 50));
     $('#chatlog-follow-profile').on('change', function () {
         $('#chatlog-profile').prop('disabled', this.checked);

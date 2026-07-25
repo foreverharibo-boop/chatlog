@@ -18,12 +18,28 @@ const ai = new Proxy({}, { get: (_, k) => _ai[k] });
 const DATA_PATH = path.join(__dirname, 'data.json');
 const SETTINGS_PATH = path.join(__dirname, 'settings.json');
 const TICK_MS = 60 * 1000;
+const MISSED_SLOT_GRACE_MS = 30 * 60 * 1000;
+const RETRY_DELAYS_MS = [10, 30, 60].map(minutes => minutes * 60 * 1000);
 
 // ST 루트 (plugins/chatlog 에서 두 단계 위)
 const ST_ROOT = path.resolve(__dirname, '..', '..');
 
 // ── 저장소 ────────────────────────────────────────────────
-let db = { rooms: {}, posts: {}, jobs: [] };
+let db = {
+    rooms: {},
+    posts: {},
+    jobs: [],
+    runtime: {
+        lastTickAt: null,
+        lastSuccessAt: null,
+        lastSuccess: '',
+        lastErrorAt: null,
+        lastError: '',
+        lastNoticeAt: null,
+        lastNotice: '',
+        skippedMissedSlots: 0,
+    },
+};
 
 let settings = {
     profileName: '',        // ST 연결 프로필 이름 (텍스트 생성용)
@@ -34,11 +50,12 @@ let settings = {
     textModel: 'gemini-2.5-flash',               // express 모드에서 쓸 텍스트 모델
     imageProvider: 'vertex',                     // 'vertex' (Express) | 'aistudio'
     imageModel: 'gemini-3.1-flash-lite-image',   // 나노바나나 2 Lite
-    imageProjectId: '',                          // Vertex 프로젝트 ID
-    imageRegion: 'global',                       // Vertex 리전
+    imageProjectId: '',                          // 구버전 설정 호환용 (Express에서는 사용 안 함)
+    imageRegion: 'global',                       // 구버전 설정 호환용 (Express에서는 사용 안 함)
     userPersonaName: '',    // 유저 페르소나 이름 (클라이언트가 동기화)
     commentDelayMinMin: 1,
     commentDelayMaxMin: 30,
+    characterCommentChance: 30, // 다른 캐릭터 게시물에 댓글도 남길 확률
     autoCleanup: false,       // 지난 날 이미지/게시물 자동 삭제
     cleanupAfterDays: 1,      // 며칠 지난 것부터 지울지
     keepSaved: true,          // 저장 표시한 건 남기기
@@ -58,6 +75,16 @@ function cleanDisplayName(value) {
 function loadAll() {
     db = loadJson(DATA_PATH, db);
     db.rooms ??= {}; db.posts ??= {}; db.jobs ??= [];
+    db.runtime ??= {};
+    db.runtime.lastTickAt ??= null;
+    db.runtime.lastSuccessAt ??= null;
+    db.runtime.lastSuccess ??= '';
+    db.runtime.lastErrorAt ??= null;
+    db.runtime.lastError ??= '';
+    db.runtime.lastNoticeAt ??= null;
+    db.runtime.lastNotice ??= '';
+    db.runtime.skippedMissedSlots ??= 0;
+    for (const job of db.jobs) job.attempts ??= 0;
     settings = { ...settings, ...loadJson(SETTINGS_PATH, {}) };
 
     for (const room of Object.values(db.rooms)) {
@@ -108,6 +135,51 @@ function saveDb() {
 function saveSettings() {
     try { fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2)); }
     catch (e) { console.error('[chatlog] 설정 저장 실패:', e.message); }
+}
+
+function jobLabel(job, result = null) {
+    const room = db.rooms[job.roomId];
+    const member = room?.members?.find(item => item.avatar === job.charId);
+    if (job.type === 'cut') {
+        return result?.status === 'posted'
+            ? `${member?.name || '캐릭터'} 게시 성공`
+            : `${member?.name || '캐릭터'} 게시 판단 완료`;
+    }
+    if (job.type === 'engagement') return `${member?.name || '캐릭터'} 댓글·반응 완료`;
+    if (job.type === 'comment') return `${member?.name || '캐릭터'} 댓글 완료`;
+    if (job.type === 'reaction') return `${member?.name || '캐릭터'} 반응 완료`;
+    return `${job.type || '작업'} 완료`;
+}
+
+function markJobSuccess(job, result) {
+    db.runtime.lastSuccessAt = Date.now();
+    db.runtime.lastSuccess = jobLabel(job, result);
+}
+
+function markJobError(job, error, retryAt = null) {
+    db.runtime.lastErrorAt = Date.now();
+    db.runtime.lastError = `${jobLabel(job).replace(/ 완료$/, '')}: ${error.message}`
+        + (retryAt ? ` · ${new Date(retryAt).toLocaleTimeString('ko-KR')} 재시도` : '');
+}
+
+function statusPayload() {
+    const nextSlotAt = Object.values(db.rooms)
+        .filter(room => !room.paused && Number.isFinite(room.nextSlotAt))
+        .reduce((earliest, room) => Math.min(earliest, room.nextSlotAt), Infinity);
+    return {
+        serverTime: Date.now(),
+        lastTickAt: db.runtime.lastTickAt,
+        lastSuccessAt: db.runtime.lastSuccessAt,
+        lastSuccess: db.runtime.lastSuccess,
+        lastErrorAt: db.runtime.lastErrorAt,
+        lastError: db.runtime.lastError,
+        lastNoticeAt: db.runtime.lastNoticeAt,
+        lastNotice: db.runtime.lastNotice,
+        skippedMissedSlots: db.runtime.skippedMissedSlots,
+        pendingJobs: db.jobs.length,
+        retryingJobs: db.jobs.filter(job => Number(job.attempts) > 0).length,
+        nextSlotAt: Number.isFinite(nextSlotAt) ? nextSlotAt : null,
+    };
 }
 
 const uid = (p) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -176,28 +248,21 @@ function activeHoursBetween(from, to, schedule = {}) {
 }
 
 // ── 작업 큐 ───────────────────────────────────────────────
-function enqueueComments(room, post) {
-    const minMs = settings.commentDelayMinMin * 60000;
-    const maxMs = settings.commentDelayMaxMin * 60000;
-    for (const member of room.members) {
-        if (member.avatar === post.author) continue;
-        db.jobs.push({
-            id: uid('job'), type: 'comment',
-            roomId: room.id, postId: post.id, charId: member.avatar,
-            runAt: Date.now() + rand(minMs, maxMs),
-        });
-    }
-    saveDb();
-}
-
-function enqueueReactions(room, post) {
+function enqueueEngagement(room, post) {
     const minMs = Math.max(10 * 1000, settings.commentDelayMinMin * 30000);
     const maxMs = Math.max(minMs, settings.commentDelayMaxMin * 60000);
     for (const member of room.members) {
         if (member.avatar === post.author) continue;
+        const commentWanted = post.author === 'user'
+            || Math.random() * 100 < Math.max(0, Math.min(100, settings.characterCommentChance));
         db.jobs.push({
-            id: uid('job'), type: 'reaction',
-            roomId: room.id, postId: post.id, charId: member.avatar,
+            id: uid('job'),
+            type: 'engagement',
+            roomId: room.id,
+            postId: post.id,
+            charId: member.avatar,
+            commentWanted,
+            attempts: 0,
             runAt: Date.now() + rand(minMs, maxMs),
         });
     }
@@ -227,6 +292,7 @@ async function runJob(job) {
             replyTo: job.replyToCommentId || null,
             createdAt: Date.now(), read: false,
         });
+        return { status: 'commented', commented: true };
     }
 
     if (job.type === 'reaction') {
@@ -245,6 +311,40 @@ async function runJob(job) {
         };
         if (existing >= 0) post.reactions.splice(existing, 1, reaction);
         else post.reactions.push(reaction);
+        return { status: 'reacted', reacted: true };
+    }
+
+    if (job.type === 'engagement') {
+        const post = findPost(job.roomId, job.postId);
+        if (!post) return;
+        const member = findMember(room, job.charId);
+        if (!member || member.avatar === post.author) return;
+        const result = await ai.generateEngagement(settings, room, post, member, {
+            commentWanted: job.commentWanted === true,
+        });
+        post.reactions ??= [];
+        const existing = post.reactions.findIndex(reaction => reaction.author === member.avatar);
+        const reaction = {
+            author: member.avatar,
+            authorName: member.name,
+            emoji: result.emoji,
+            createdAt: Date.now(),
+        };
+        if (existing >= 0) post.reactions.splice(existing, 1, reaction);
+        else post.reactions.push(reaction);
+
+        if (result.comment) {
+            post.comments.push({
+                id: uid('c'),
+                author: member.avatar,
+                authorName: member.name,
+                text: result.comment,
+                replyTo: null,
+                createdAt: Date.now(),
+                read: false,
+            });
+        }
+        return { status: 'engaged', commented: !!result.comment, reacted: true };
     }
 
     if (job.type === 'cut') {
@@ -276,8 +376,43 @@ async function runJob(job) {
             read: false, comments: [], reactions: [],
         };
         (db.posts[room.id] ??= []).push(post);
-        enqueueReactions(room, post);
+        enqueueEngagement(room, post);
         return { status: 'posted', post };
+    }
+}
+
+function retryableJobError(error) {
+    const message = String(error?.message || '');
+    if (/(?:400|401|403|invalid api|api 키|연결 프로필을 찾을 수 없음|프로젝트 ID)/i.test(message)) {
+        return false;
+    }
+    return true;
+}
+
+async function executeJob(job, allowRetry = true) {
+    try {
+        const result = await runJob(job);
+        markJobSuccess(job, result);
+        return result;
+    } catch (error) {
+        const attempts = Number(job.attempts || 0) + 1;
+        const canRetry = allowRetry
+            && retryableJobError(error)
+            && attempts < RETRY_DELAYS_MS.length + 1;
+        if (canRetry) {
+            const retryAt = Date.now() + RETRY_DELAYS_MS[attempts - 1];
+            db.jobs.push({
+                ...job,
+                attempts,
+                lastError: error.message,
+                runAt: retryAt,
+            });
+            markJobError(job, error, retryAt);
+            console.warn(`[chatlog] 작업 재시도 예약 (${attempts}/3):`, job.type, error.message);
+            return { status: 'retrying', retryAt, error: error.message };
+        }
+        markJobError(job, error);
+        throw error;
     }
 }
 
@@ -330,6 +465,60 @@ function runCleanup() {
     }
 }
 
+function isActiveAt(room, timestamp) {
+    const hour = new Date(timestamp).getHours();
+    const from = room.schedule?.activeFrom ?? 8;
+    const to = room.schedule?.activeTo ?? 24;
+    return hour >= from && hour < to;
+}
+
+function latestPostAtForMember(room, member) {
+    const previous = (db.posts[room.id] || [])
+        .filter(post => post.author === member.avatar)
+        .sort((a, b) => (b.slotAt ?? b.createdAt) - (a.slotAt ?? a.createdAt))[0];
+    return previous?.slotAt ?? previous?.createdAt ?? room.createdAt;
+}
+
+function skipMissedSlots(room, now) {
+    db.runtime.skippedMissedSlots += 1;
+    const overdueMembers = [];
+    if (isActiveAt(room, now)) {
+        for (const member of room.members) {
+            const maxSilenceHours = Math.max(
+                room.schedule?.cutIntervalHours ?? 2,
+                room.schedule?.maxSilenceHours ?? 12,
+            );
+            const activeGap = activeHoursBetween(
+                latestPostAtForMember(room, member),
+                now,
+                room.schedule,
+            );
+            const alreadyQueued = db.jobs.some(job => job.type === 'cut'
+                && job.roomId === room.id
+                && job.charId === member.avatar);
+            if (activeGap >= maxSilenceHours && !alreadyQueued) {
+                overdueMembers.push(member);
+                db.jobs.push({
+                    id: uid('job'),
+                    type: 'cut',
+                    roomId: room.id,
+                    charId: member.avatar,
+                    slotAt: now,
+                    runAt: now + rand(0, 2 * 60 * 1000),
+                    forcePost: true,
+                    attempts: 0,
+                    resumedAfterGap: true,
+                });
+            }
+        }
+    }
+    if (overdueMembers.length) recordSlot(room, now);
+    room.nextSlotAt = computeNextSlot(room, now);
+    db.runtime.lastNoticeAt = now;
+    db.runtime.lastNotice = `${room.name}: 밀린 슬롯 건너뜀`
+        + (overdueMembers.length ? ` · 최대 공백 ${overdueMembers.length}명 현재 시각 재개` : '');
+}
+
 // ── 매분 틱 ───────────────────────────────────────────────
 let ticking = false;
 async function tick() {
@@ -338,16 +527,22 @@ async function tick() {
     const now = Date.now();
 
     try {
+        db.runtime.lastTickAt = now;
         for (const room of Object.values(db.rooms)) {
             if (room.paused) continue;
             if (!room.nextSlotAt) { room.nextSlotAt = computeNextSlot(room); continue; }
             if (room.nextSlotAt > now) continue;
+            if (now - room.nextSlotAt > MISSED_SLOT_GRACE_MS) {
+                skipMissedSlots(room, now);
+                continue;
+            }
 
             const slotAt = room.nextSlotAt;
             recordSlot(room, slotAt);
             for (const member of room.members) {
                 db.jobs.push({
                     id: uid('job'), type: 'cut', roomId: room.id, charId: member.avatar, slotAt,
+                    attempts: 0,
                     runAt: slotAt + rand(0, 10 * 60 * 1000), // 동시에 우르르 올리지 않게 분산
                 });
             }
@@ -358,7 +553,7 @@ async function tick() {
         if (due.length) {
             db.jobs = db.jobs.filter(j => j.runAt > now);
             for (const job of due) {
-                try { await runJob(job); }
+                try { await executeJob(job, true); }
                 catch (e) { console.error('[chatlog] 작업 실패:', job.type, e.message); }
             }
         }
@@ -379,6 +574,7 @@ async function init(router) {
     loadAll();
 
     router.get('/state', (req, res) => res.json({ rooms: db.rooms, posts: db.posts }));
+    router.get('/status', (req, res) => res.json(statusPayload()));
 
     router.get('/settings', (req, res) => {
         res.json({ ...settings, imageApiKey: settings.imageApiKey ? '••••' : '' });
@@ -455,8 +651,7 @@ async function init(router) {
             read: true, comments: [], reactions: [],
         };
         (db.posts[roomId] ??= []).push(post);
-        enqueueComments(room, post);
-        enqueueReactions(room, post);
+        enqueueEngagement(room, post);
         saveDb();
         res.json(post);
     });
@@ -500,6 +695,35 @@ async function init(router) {
             const post = j.postId ? findPost(j.roomId, j.postId) : null;
             return { ...j, member, post, roomName: room?.name };
         }));
+    });
+
+    router.post('/jobs/requeue', (req, res) => {
+        const source = req.body?.job || {};
+        if (!source.roomId || !source.charId || !source.type) {
+            return res.status(400).json({ error: 'invalid job' });
+        }
+        const attempts = Number(source.attempts || 0) + 1;
+        if (attempts >= RETRY_DELAYS_MS.length + 1) {
+            return res.status(400).json({ error: 'retry limit reached' });
+        }
+        const retryAt = Date.now() + RETRY_DELAYS_MS[Math.min(attempts - 1, RETRY_DELAYS_MS.length - 1)];
+        const job = {
+            id: source.id || uid('job'),
+            type: source.type,
+            roomId: source.roomId,
+            postId: source.postId,
+            charId: source.charId,
+            replyToCommentId: source.replyToCommentId,
+            commentWanted: source.commentWanted,
+            slotAt: source.slotAt,
+            forcePost: source.forcePost,
+            attempts,
+            runAt: retryAt,
+        };
+        db.jobs.push(job);
+        markJobError(job, new Error(req.body?.error || '브라우저 작업 실패'), retryAt);
+        saveDb();
+        res.json({ ok: true, retryAt, attempts });
     });
 
     // 클라이언트가 생성한 댓글을 되돌려 넣음
@@ -547,6 +771,7 @@ async function init(router) {
                 id: uid('job'), type: 'comment',
                 roomId, postId, charId: post.author,
                 replyToCommentId: userComment.id,
+                attempts: 0,
                 runAt: Date.now() + rand(minMs, maxMs),
             });
         }
@@ -617,10 +842,23 @@ async function init(router) {
         for (const room of rooms) {
             // 1. 대기 중인 댓글 작업 즉시 실행
             if (what === 'all' || what === 'comments') {
-                const pending = db.jobs.filter(j => j.roomId === room.id && j.type === 'comment');
-                db.jobs = db.jobs.filter(j => !(j.roomId === room.id && j.type === 'comment'));
+                const pending = db.jobs.filter(job => job.roomId === room.id
+                    && Number(job.attempts || 0) === 0
+                    && (job.type === 'comment'
+                        || (job.type === 'engagement' && job.commentWanted === true)));
+                db.jobs = db.jobs.filter(job => !pending.includes(job));
                 for (const job of pending) {
-                    try { await runJob(job); done.comments++; }
+                    try {
+                        const result = await executeJob(job, true);
+                        if (result?.status !== 'retrying') {
+                            if (job.type === 'engagement') {
+                                done.comments += result?.commented ? 1 : 0;
+                                done.reactions += result?.reacted ? 1 : 0;
+                            } else {
+                                done.comments++;
+                            }
+                        }
+                    }
                     catch (e) { done.errors.push(`comment: ${e.message}`); }
                 }
             }
@@ -631,15 +869,17 @@ async function init(router) {
                 recordSlot(room, slotAt);
                 for (const member of room.members) {
                     try {
-                        const result = await runJob({
+                        const result = await executeJob({
+                            id: uid('job'),
                             type: 'cut',
                             roomId: room.id,
                             charId: member.avatar,
                             slotAt,
                             forcePost: true,
-                        });
+                            attempts: 0,
+                        }, true);
                         if (result?.status === 'posted') done.cuts++;
-                        else done.skipped++;
+                        else if (result?.status !== 'retrying') done.skipped++;
                     } catch (e) { done.errors.push(`cut(${member.name}): ${e.message}`); }
                 }
             }
@@ -647,10 +887,18 @@ async function init(router) {
             // 3. 대기 중인 캐릭터 반응 즉시 실행
             // all에서는 바로 위에서 새로 만든 컷의 반응 작업도 함께 처리한다.
             if (what === 'all' || what === 'reactions') {
-                const pending = db.jobs.filter(j => j.roomId === room.id && j.type === 'reaction');
-                db.jobs = db.jobs.filter(j => !(j.roomId === room.id && j.type === 'reaction'));
+                const pending = db.jobs.filter(job => job.roomId === room.id
+                    && Number(job.attempts || 0) === 0
+                    && (job.type === 'reaction' || job.type === 'engagement'));
+                db.jobs = db.jobs.filter(job => !pending.includes(job));
                 for (const job of pending) {
-                    try { await runJob(job); done.reactions++; }
+                    try {
+                        const result = await executeJob(job, true);
+                        if (result?.status !== 'retrying') {
+                            done.reactions += result?.reacted ? 1 : 0;
+                            done.comments += result?.commented ? 1 : 0;
+                        }
+                    }
                     catch (e) { done.errors.push(`reaction: ${e.message}`); }
                 }
             }
@@ -673,6 +921,8 @@ async function init(router) {
     router.get('/jobs', (req, res) => {
         res.json(db.jobs.map(j => ({
             type: j.type, roomId: j.roomId, charId: j.charId,
+            attempts: Number(j.attempts || 0),
+            lastError: j.lastError || null,
             runAt: new Date(j.runAt).toLocaleString('ko-KR'),
             inMinutes: Math.round((j.runAt - Date.now()) / 60000),
         })));

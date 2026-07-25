@@ -92,42 +92,109 @@ function readPersonaAvatar(settings, avatarFile) {
 }
 
 // ── 최근 대화 읽기 ────────────────────────────────────────
-/**
- * data/<user>/chats/<캐릭터명>/ 안에서 가장 최근 .jsonl 을 열어 마지막 N개 발화를 뽑는다.
- * 컷 생성에서는 말투와 유저와의 관계만 참고한다. 대화 속 유저의 행동을 캐릭터의
- * 실제 일상으로 오인하지 않도록 발화 주체를 명시한다.
- */
-function readRecentChat(settings, charName, limit = 12) {
-    if (!charName) return '';
-    const dir = path.join(ST_ROOT, 'data', settings.userHandle || 'default-user', 'chats', charName);
+function identityKey(value) {
+    if (!value) return '';
+    let text = String(value).trim();
+    try { text = decodeURIComponent(text); } catch { /* 일반 문자열 */ }
+    return path.basename(text)
+        .replace(/\.(png|jpe?g|webp|gif|avif)$/i, '')
+        .trim()
+        .toLowerCase();
+}
 
-    let files;
-    try {
-        files = fs.readdirSync(dir)
-            .filter(f => f.endsWith('.jsonl'))
-            .map(f => ({ f, t: fs.statSync(path.join(dir, f)).mtimeMs }))
-            .sort((a, b) => b.t - a.t);
-    } catch {
-        return '';
+function metadataIdentityValues(value, key = '', depth = 0, output = []) {
+    if (depth > 4 || value == null) return output;
+    if (typeof value === 'string' || typeof value === 'number') {
+        if (/^(user_name|user_avatar|persona|persona_name|persona_avatar|persona_id)$/i.test(key)
+            || /(?:user|persona).*(?:name|avatar|file|id)/i.test(key)) {
+            output.push(String(value));
+        }
+        return output;
+    }
+    if (Array.isArray(value)) {
+        value.forEach(item => metadataIdentityValues(item, key, depth + 1, output));
+        return output;
+    }
+    if (typeof value === 'object') {
+        for (const [childKey, child] of Object.entries(value)) {
+            metadataIdentityValues(child, childKey, depth + 1, output);
+        }
+    }
+    return output;
+}
+
+function chatPersonaScore(header, persona) {
+    if (!persona) return 0;
+    const values = metadataIdentityValues(header);
+    const personaAvatar = identityKey(persona.avatar || persona.file);
+    const personaName = identityKey(persona.name);
+    let score = 0;
+    for (const value of values) {
+        const normalized = identityKey(value);
+        if (personaAvatar && normalized === personaAvatar) score = Math.max(score, 3);
+        if (personaName && normalized === personaName) score = Math.max(score, 2);
+    }
+    return score;
+}
+
+/**
+ * 캐릭터 채팅 폴더에서 연결 페르소나 메타데이터와 일치하는 최신 JSONL을 고른다.
+ * 메타데이터가 없는 예전 채팅은 최후에 전체 최신 파일로 폴백한다.
+ */
+function readRecentChat(settings, memberOrName, limit = 12, persona = null) {
+    const member = typeof memberOrName === 'string'
+        ? { name: memberOrName, avatar: '' }
+        : (memberOrName || {});
+    const charName = member.name || identityKey(member.avatar);
+    if (!charName) return '';
+
+    const chatsRoot = path.join(ST_ROOT, 'data', settings.userHandle || 'default-user', 'chats');
+    const directoryNames = [...new Set([
+        member.name,
+        identityKey(member.avatar),
+    ].filter(Boolean))];
+    const files = [];
+
+    for (const directoryName of directoryNames) {
+        const dir = path.join(chatsRoot, directoryName);
+        try {
+            for (const file of fs.readdirSync(dir).filter(name => name.endsWith('.jsonl'))) {
+                const absolute = path.join(dir, file);
+                const raw = fs.readFileSync(absolute, 'utf-8');
+                const firstLine = raw.split('\n').find(Boolean) || '';
+                let header = {};
+                try { header = JSON.parse(firstLine); } catch { /* 구형/손상 메타 */ }
+                files.push({
+                    absolute,
+                    raw,
+                    score: chatPersonaScore(header, persona),
+                    time: fs.statSync(absolute).mtimeMs,
+                });
+            }
+        } catch { /* 후보 폴더 없음 */ }
     }
     if (!files.length) return '';
 
-    try {
-        const lines = fs.readFileSync(path.join(dir, files[0].f), 'utf-8')
-            .split('\n')
-            .filter(Boolean);
+    const matched = files.filter(file => file.score > 0)
+        .sort((a, b) => b.score - a.score || b.time - a.time);
+    const selected = matched[0] || files.sort((a, b) => b.time - a.time)[0];
+    if (!matched.length && persona?.name) {
+        console.warn(`[chatlog] ${charName}의 "${persona.name}" 메타 채팅을 못 찾아 전체 최신 채팅으로 폴백`);
+    }
 
+    try {
+        const lines = selected.raw.split('\n').filter(Boolean);
         const msgs = [];
         for (const line of lines) {
             try {
-                const o = JSON.parse(line);
-                if (!o.mes) continue;                 // 첫 줄은 메타데이터
-                const speaker = o.is_user === true
-                    ? '유저'
-                    : o.name === charName
+                const message = JSON.parse(line);
+                if (!message.mes) continue;
+                const speaker = message.is_user === true
+                    ? `유저(${persona?.name || '유저'})`
+                    : message.name === charName
                         ? `캐릭터(${charName})`
-                        : `다른 인물(${o.name || '알 수 없음'})`;
-                msgs.push(`${speaker}: ${String(o.mes).replace(/\s+/g, ' ').slice(0, 200)}`);
+                        : `다른 인물(${message.name || '알 수 없음'})`;
+                msgs.push(`${speaker}: ${String(message.mes).replace(/\s+/g, ' ').slice(0, 200)}`);
             } catch { /* 깨진 줄 무시 */ }
         }
         return msgs.slice(-limit).join('\n');
@@ -157,14 +224,12 @@ function readImageAsBase64(webPath) {
  * 폴라로이드 프록시와 같은 방식. Vertex Express 모드는 서비스 계정 OAuth 없이
  * API 키를 x-goog-api-key 헤더로 그대로 넘긴다.
  */
-function googleUrl({ provider, model, projectId, region }) {
+function googleUrl({ provider, model }) {
     if (provider === 'vertex') {
-        if (!projectId) throw new Error('Vertex 모드에는 프로젝트 ID가 필요합니다');
-        const r = region || 'global';
-        const base = r === 'global'
-            ? 'https://aiplatform.googleapis.com/v1'
-            : `https://${r}-aiplatform.googleapis.com/v1`;
-        return `${base}/projects/${projectId}/locations/${r}/publishers/google/models/${model}:generateContent`;
+        // Express Mode는 API 키 전용 전역 경로를 사용한다.
+        // projects/locations가 포함된 표준 Vertex 경로는 OAuth2를 요구해
+        // Express 키를 보내면 CREDENTIALS_MISSING 401이 발생한다.
+        return `https://aiplatform.googleapis.com/v1/publishers/google/models/${model}:generateContent`;
     }
     return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 }
@@ -196,7 +261,7 @@ async function callGemini(api, { system, user, image, json: wantJson }) {
     if (image) parts.push({ inline_data: { mime_type: image.mime, data: image.data } });
 
     const generationConfig = { temperature: 1.0, maxOutputTokens: 2048 };
-    if (wantJson) generationConfig.response_mime_type = 'application/json';
+    if (wantJson) generationConfig.responseMimeType = 'application/json';
     // gemini-2.5 계열은 thinking이 기본 ON — 출력 토큰을 생각에 다 쓰고 빈 답을 주는 원인.
     if (/2\.5/.test(api.model || '')) {
         generationConfig.thinkingConfig = { thinkingBudget: 0 };
@@ -340,8 +405,8 @@ async function generateComment(settings, room, post, member, options = {}) {
     const api = resolveTextApi(settings);
     if (!api) throw new Error('연결 프로필을 찾을 수 없음');
 
-    const recent = readRecentChat(settings, member.name, 8);
     const persona = relationshipPersona(settings, room, member);
+    const recent = readRecentChat(settings, member, 8, persona);
     const personaName = persona.name || '유저';
     const isOwnPost = post.author === member.avatar;
     const authorName = postAuthorName(settings, room, post, member);
@@ -410,11 +475,23 @@ async function generateComment(settings, room, post, member, options = {}) {
 // ── 캐릭터 이모지 반응 생성 ────────────────────────────────
 const REACTION_EMOJIS = ['❤️', '😂', '🥹', '😮', '😢', '😡', '👏', '🔥', '👍', '👀'];
 
+function cleanGeneratedComment(raw) {
+    return String(raw || '')
+        .trim()
+        .replace(/^["'「『]|["'」』]$/g, '')
+        .replace(/^\*+|\*+$/g, '')
+        .replace(/^[^:\n]{1,20}:\s*/, '')
+        .split('\n')[0]
+        .slice(0, 120)
+        .trim();
+}
+
 async function generateReaction(settings, room, post, member) {
     const api = resolveTextApi(settings);
     if (!api) throw new Error('연결 프로필을 찾을 수 없음');
 
-    const recent = readRecentChat(settings, member.name, 5);
+    const persona = relationshipPersona(settings, room, member);
+    const recent = readRecentChat(settings, member, 5, persona);
     const authorName = postAuthorName(settings, room, post, member);
     const system = [
         `너는 "${member.name}"이다. 아래 인물의 성격대로 반응한다.`,
@@ -443,14 +520,71 @@ async function generateReaction(settings, room, post, member) {
     return REACTION_EMOJIS.find(emoji => String(raw).includes(emoji)) || '👍';
 }
 
+/**
+ * 게시물 하나에 대한 댓글과 이모지를 한 번의 호출로 생성해 비용을 줄인다.
+ * commentWanted=false면 반응만 생성한다.
+ */
+async function generateEngagement(settings, room, post, member, options = {}) {
+    const api = resolveTextApi(settings);
+    if (!api) throw new Error('연결 프로필을 찾을 수 없음');
+
+    const persona = relationshipPersona(settings, room, member);
+    const recent = readRecentChat(settings, member, 6, persona);
+    const authorName = postAuthorName(settings, room, post, member);
+    const commentWanted = options.commentWanted === true;
+    const system = [
+        `너는 "${member.name}"이다. 아래 인물을 완전히 연기한다.`,
+        '',
+        charBlock(member),
+        persona.description
+            ? `\n[이 캐릭터에게 연결된 유저 페르소나]\n이름: ${persona.name}\n설명: ${persona.description}`
+            : '',
+        recent ? `\n[최근 대화 분위기와 관계]\n${recent}` : '',
+        '',
+        `"${authorName}"의 챗로그 게시물에 반응한다.`,
+        'JSON만 출력한다. 마크다운 코드펜스 금지.',
+        '{"comment":"댓글 또는 빈 문자열","emoji":"허용된 이모지 하나"}',
+        `emoji는 반드시 다음 중 하나다: ${REACTION_EMOJIS.join(' ')}`,
+        commentWanted
+            ? 'comment는 반드시 작성한다. 1~2문장, 40자 내외의 자연스러운 SNS 댓글로 쓴다.'
+            : 'comment는 빈 문자열로 둔다.',
+        commentWanted && post.author !== 'user'
+            ? '다른 캐릭터의 게시물이다. 둘의 성격에 어울리게 짧게 말을 걸되 억지로 친한 척하거나 관계를 새로 만들지 마라.'
+            : '',
+        '사진이 있으면 사진 속 구체적인 것 하나를 짚을 수 있다.',
+        '나레이션, 행동 묘사, 따옴표, 이름표를 붙이지 마라.',
+    ].filter(Boolean).join('\n');
+    const user = [
+        `[${timeLabel(post.createdAt)}에 올라온 게시물]`,
+        post.text ? `글: ${post.text}` : '(글 없음)',
+        post.image ? '(사진 첨부됨)' : '(사진 없음)',
+        '',
+        '지정한 JSON 형식으로만 답하라.',
+    ].join('\n');
+
+    const raw = await callText(api, {
+        system,
+        user,
+        image: readImageAsBase64(post.image),
+        json: true,
+    });
+    const parsed = extractJson(raw);
+    if (!parsed) throw new Error('댓글·반응 JSON 파싱 실패');
+    const emoji = REACTION_EMOJIS.find(item => String(parsed.emoji).includes(item)) || '👍';
+    return {
+        comment: commentWanted ? cleanGeneratedComment(parsed.comment) : '',
+        emoji,
+    };
+}
+
 // ── 캐릭터 컷 생성 ────────────────────────────────────────
 async function generateCharacterCut(settings, room, member, slotAt, decision = {}) {
     const api = resolveTextApi(settings);
     if (!api) throw new Error('연결 프로필을 찾을 수 없음');
 
-    const recent = readRecentChat(settings, member.name, 8);
     const forcePost = !!decision.forcePost;
     const persona = relationshipPersona(settings, room, member);
+    const recent = readRecentChat(settings, member, 8, persona);
     const personaName = persona.name || settings.userPersonaName || '유저';
     const personaDescription = persona.description || '';
     const temporal = seasonContext(slotAt);
@@ -723,8 +857,10 @@ module.exports = {
     getDebug,
     generateComment,
     generateReaction,
+    generateEngagement,
     generateCharacterCut,
     generateImage,
     timeLabel,
     seasonContext,
+    chatPersonaScore,
 };
