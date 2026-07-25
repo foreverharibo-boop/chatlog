@@ -155,16 +155,19 @@ async function callGoogle(cfg, body) {
 }
 
 // ── 프로바이더별 호출 ─────────────────────────────────────
-async function callGemini(api, { system, user, image }) {
+async function callGemini(api, { system, user, image, json: wantJson }) {
     const parts = [{ text: user }];
     if (image) parts.push({ inline_data: { mime_type: image.mime, data: image.data } });
+
+    const generationConfig = { temperature: 1.0, maxOutputTokens: 400 };
+    if (wantJson) generationConfig.response_mime_type = 'application/json';
 
     const json = await callGoogle(
         { provider: api.provider, model: api.model, apiKey: api.apiKey, projectId: api.projectId, region: api.region },
         {
             system_instruction: { parts: [{ text: system }] },
             contents: [{ role: 'user', parts }],
-            generationConfig: { temperature: 1.0, maxOutputTokens: 200 },
+            generationConfig,
         },
     );
     return json?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '';
@@ -207,6 +210,20 @@ async function callText(api, payload) {
         return callGemini(api, payload);
     }
     return callOpenAiCompatible(api, payload);
+}
+
+// ── JSON 추출 (코드펜스/잡소리에 강함) ──────────────────────
+function extractJson(raw) {
+    if (!raw) return null;
+    const text = String(raw).replace(/```[a-z]*\n?/gi, '').trim();
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start < 0 || end <= start) return null;
+    try {
+        return JSON.parse(text.slice(start, end + 1));
+    } catch {
+        return null;
+    }
 }
 
 // ── 프롬프트 ──────────────────────────────────────────────
@@ -318,13 +335,10 @@ async function generateCharacterCut(settings, room, member, slotAt) {
         '이 시각에 너는 어디서 뭘 하고 있나? JSON으로 답하라.',
     ].join('\n');
 
-    const raw = await callText(api, { system, user });
-
-    let parsed;
-    try {
-        parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
-    } catch {
-        parsed = { caption: raw.trim().slice(0, 40), scene: '' };
+    const raw = await callText(api, { system, user, json: true });
+    const parsed = extractJson(raw) || { caption: '', scene: '' };
+    if (!parsed.scene) {
+        console.warn('[chatlog] scene 파싱 실패, 원문:', String(raw).slice(0, 200));
     }
 
     let image = null;
@@ -336,7 +350,7 @@ async function generateCharacterCut(settings, room, member, slotAt) {
         }
     }
 
-    return { text: parsed.caption || '', image };
+    return { text: (parsed.caption || '').slice(0, 60), image };
 }
 
 // ── 이미지 생성 ───────────────────────────────────────────

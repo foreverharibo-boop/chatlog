@@ -945,6 +945,41 @@ function registerSlashCommands() {
     }));
 }
 
+
+// ═══════════ 콘솔 디버그 헬퍼 (window.cl) ═══════════
+// 브라우저 콘솔에서 바로 사용: cl.rooms(), cl.run('cut'), cl.posts() ...
+window.cl = {
+    _call: api,
+    rooms: async () => Object.values((await api('/state')).rooms)
+        .map(r => ({ id: r.id, name: r.name, 멤버: r.members.map(m => m.name).join(','),
+                     다음: new Date(r.nextSlotAt).toLocaleString('ko-KR') })),
+    run: (what = 'all', roomId = null) => api('/force', { what, roomId }),
+    now: () => api('/force/now', {}),
+    posts: async (roomId) => {
+        const s = await api('/state');
+        const id = roomId || Object.keys(s.rooms)[0];
+        return (s.posts[id] || []).map(p => ({ 작성자: p.authorName || p.author, 글: p.text,
+            사진: p.image, 댓글: p.comments.map(c => `${c.authorName}: ${c.text}`) }));
+    },
+    settings: () => api('/settings'),
+    set: (o) => api('/settings', o),
+    img: (prompt) => api('/test/image', prompt ? { prompt } : {}),
+    reload: () => api('/reload', {}),
+    jobs: () => api('/jobs'),
+    cleanup: () => api('/cleanup', { force: true }),
+    help: () => console.table({
+        'cl.rooms()': '방 목록 + 다음 슬롯',
+        "cl.run('cut'|'comments'|'all')": '지금 강제 생성',
+        'cl.now()': '다음 슬롯을 지금으로 (1분 내 실행)',
+        'cl.posts()': '게시물/댓글 확인',
+        'cl.settings() / cl.set({...})': '설정 확인/변경',
+        "cl.img('prompt?')": '이미지 생성 테스트',
+        'cl.reload()': 'ai.js 핫 리로드',
+        'cl.jobs()': '대기 작업',
+        'cl.cleanup()': '지난 기록 즉시 정리',
+    }),
+};
+
 // ── 진입 ──────────────────────────────────────────────────
 jQuery(async () => {
     $('#extensions_settings2').append(SETTINGS_HTML);
@@ -1001,5 +1036,5 @@ jQuery(async () => {
     }, ms));
 
     registerSlashCommands();
-    console.log('[chatlog] 로드됨');
+    console.log('[chatlog] 로드됨 — 콘솔에서 cl.help() 로 디버그 명령 확인');
 });
