@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.6.9';
+const CHATLOG_VERSION = '0.7.0';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -52,51 +52,103 @@ function dayKey(ts) {
     return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
 }
 
-// ── 페르소나(유저) 아바타 — 현재 선택된 페르소나를 자동 추적 ──
-/**
- * 캐릭터에 연결(락)된 페르소나 찾기 — 폴라로이드 방식.
- * power_user.persona_descriptions 의 connections 에 방 멤버 캐릭터가 걸려 있으면
- * 그 페르소나를 쓴다. 연결이 없으면 현재 활성 페르소나 → DOM 폴백.
- */
-function personaForRoom(room) {
+// ── 표시 페르소나 / 캐릭터별 연결 페르소나 ───────────────
+function personaStore() {
     const c = ctx();
     const pu = c.powerUserSettings || window.power_user || {};
-    const descs = pu.persona_descriptions || {};
-    const names = pu.personas || {};
-    const charAvatars = (room?.members || []).map(m => m.avatar);
-
-    const matches = (conn) => {
-        if (!conn) return false;
-        const id = typeof conn === 'string' ? conn : (conn.id ?? conn.characterKey ?? conn.avatar);
-        return charAvatars.includes(id);
+    return {
+        c,
+        pu,
+        descs: pu.persona_descriptions || {},
+        names: pu.personas || {},
     };
+}
+
+function normalizePersona(persona) {
+    if (!persona) return null;
+    return {
+        file: persona.file || persona.avatar || null,
+        name: persona.name || ctx().name1 || '나',
+        description: persona.description || '',
+    };
+}
+
+function personaFromFile(file) {
+    if (!file) return null;
+    const { c, descs, names } = personaStore();
+    const meta = descs[file];
+    return {
+        file,
+        name: names[file] || c.name1 || '나',
+        description: typeof meta === 'string'
+            ? meta
+            : (meta?.description || meta?.prompt || ''),
+    };
+}
+
+function activePersona() {
+    const { c, pu } = personaStore();
+    const file = c.userAvatar || window.user_avatar || pu.default_persona;
+    return personaFromFile(file) || { file: null, name: c.name1 || '나', description: '' };
+}
+
+function connectionTarget(conn) {
+    if (!conn) return '';
+    return String(typeof conn === 'string'
+        ? conn
+        : (conn.id ?? conn.characterKey ?? conn.avatar ?? ''));
+}
+
+function linkedPersonaForMember(member) {
+    if (!member?.avatar) return null;
+    const { descs } = personaStore();
+    const target = String(member.avatar);
 
     for (const [file, meta] of Object.entries(descs)) {
-        if ((meta?.connections || []).some(matches)) {
-            return {
-                file,
-                name: names[file] || c.name1 || '나',
-                description: typeof meta === 'string'
-                    ? meta
-                    : (meta?.description || meta?.prompt || ''),
-            };
+        if ((meta?.connections || []).some(conn => connectionTarget(conn) === target)) {
+            return personaFromFile(file);
         }
     }
+    return null;
+}
 
-    // 연결된 페르소나 없음 → 현재 활성 페르소나
-    const file = c.userAvatar || window.user_avatar || pu.default_persona;
-    if (file) {
-        const meta = descs[file];
-        return {
-            file,
-            name: names[file] || c.name1 || '나',
-            description: typeof meta === 'string'
-                ? meta
-                : (meta?.description || meta?.prompt || ''),
-        };
+function connectedPersonasForMembers(members) {
+    const unique = new Map();
+    for (const member of members || []) {
+        const persona = linkedPersonaForMember(member);
+        if (!persona) continue;
+        unique.set(persona.file || persona.name, persona);
     }
+    return [...unique.values()];
+}
 
-    return { file: null, name: c.name1 || '나', description: '' };
+function memberPersonasForMembers(members) {
+    return Object.fromEntries((members || [])
+        .map(member => [member.avatar, linkedPersonaForMember(member)])
+        .filter(([, persona]) => !!persona)
+        .map(([avatar, persona]) => [avatar, {
+            name: persona.name,
+            description: persona.description || '',
+            avatar: persona.file || null,
+        }]));
+}
+
+/**
+ * 방 화면에 표시할 페르소나. 새 단톡 생성 때 고른 room.persona를 우선하고,
+ * 예전 방처럼 저장값이 없을 때만 현재 활성 페르소나로 폴백한다.
+ */
+function personaForRoom(room) {
+    const stored = normalizePersona(room?.persona);
+    if (stored) return stored;
+    return activePersona();
+}
+
+/**
+ * AI 관계 판단용 페르소나. 캐릭터 연결값을 우선하고 없으면 표시 페르소나를 쓴다.
+ */
+function personaForMember(room, member) {
+    const stored = normalizePersona(room?.memberPersonas?.[member?.avatar]);
+    return stored || linkedPersonaForMember(member) || personaForRoom(room);
 }
 
 function userAvatarUrl(room) {
@@ -139,9 +191,16 @@ async function syncRoomCharacterCards() {
             description: persona.description || '',
             avatar: persona.file || null,
         };
+        const personaRecordsReady = Object.keys(personaStore().descs).length > 0;
+        const memberPersonas = personaRecordsReady
+            ? memberPersonasForMembers(members)
+            : (room.memberPersonas || {});
         const patch = {};
         if (JSON.stringify(members) !== JSON.stringify(room.members || [])) patch.members = members;
         if (JSON.stringify(personaSnapshot) !== JSON.stringify(room.persona || {})) patch.persona = personaSnapshot;
+        if (JSON.stringify(memberPersonas) !== JSON.stringify(room.memberPersonas || {})) {
+            patch.memberPersonas = memberPersonas;
+        }
         if (!Object.keys(patch).length) continue;
         Object.assign(room, patch);
         await api('/room/update', { roomId: room.id, ...patch });
@@ -1055,6 +1114,47 @@ function dayLogView(room) {
 }
 
 // ── 방 만들기 ─────────────────────────────────────────────
+async function chooseDisplayPersona(c, members) {
+    let candidates = connectedPersonasForMembers(members);
+    if (!candidates.length) candidates = [activePersona()];
+
+    const active = activePersona();
+    const selectedIndex = Math.max(0, candidates.findIndex(persona => persona.file === active.file));
+    const $picker = $(`
+      <div class="chatlog-personapick">
+        <div class="chatlog-picktitle">이 단톡에 표시할 페르소나</div>
+        <div class="chatlog-pickhint">캐릭터별 관계는 각자 연결된 페르소나를 따로 참고해요.</div>
+        <div class="chatlog-personagrid"></div>
+      </div>`);
+    const $grid = $picker.find('.chatlog-personagrid');
+
+    candidates.forEach((persona, index) => {
+        const $row = $('<label class="chatlog-personarow"></label>');
+        $('<input>', {
+            type: 'radio',
+            name: 'chatlog-display-persona',
+            value: String(index),
+            checked: index === selectedIndex,
+        }).appendTo($row);
+        $('<img>', {
+            src: persona.file
+                ? `/User Avatars/${encodeURIComponent(persona.file)}`
+                : '/img/user-default.png',
+            alt: '',
+        }).appendTo($row);
+        $('<span>').text(persona.name).appendTo($row);
+        $grid.append($row);
+    });
+
+    const ok = await c.callGenericPopup?.($picker[0], c.POPUP_TYPE?.CONFIRM, '', {
+        okButton: '이 페르소나로 만들기',
+        cancelButton: '취소',
+    });
+    if (!ok) return null;
+    const index = Number($picker.find('input:checked').val());
+    return candidates[index] || candidates[0];
+}
+
 async function createRoomFlow() {
     const c = ctx();
     const chars = c.characters || [];
@@ -1070,16 +1170,22 @@ async function createRoomFlow() {
           </label>`);
     });
 
-    const ok = await c.callGenericPopup?.($list[0], c.POPUP_TYPE?.CONFIRM, '', { okButton: '만들기' });
+    const ok = await c.callGenericPopup?.($list[0], c.POPUP_TYPE?.CONFIRM, '', { okButton: '다음' });
     if (!ok) return;
 
     const picked = $list.find('input:checked').map((_, el) => el.value).get();
+    if (!picked.length) {
+        showError('캐릭터를 한 명 이상 선택해 주세요.');
+        return;
+    }
     const members = picked.map(av => {
         const ch = chars.find(x => x.avatar === av) || {};
         return characterSnapshot(ch, av);
     });
 
-    const persona = personaForRoom({ members });
+    const persona = await chooseDisplayPersona(c, members);
+    if (!persona) return;
+    const memberPersonas = memberPersonasForMembers(members);
     await api('/room', {
         name,
         members,
@@ -1089,6 +1195,7 @@ async function createRoomFlow() {
             description: persona.description || '',
             avatar: persona.file || null,
         },
+        memberPersonas,
     });
     refresh();
 }
@@ -1152,7 +1259,8 @@ function buildCommentMessages(job) {
     const m = job.member || {};
     const p = job.post || {};
     const room = state.rooms[job.roomId];
-    const userName = room ? personaForRoom(room).name : '유저';
+    const relationshipPersona = room ? personaForMember(room, m) : null;
+    const userName = relationshipPersona?.name || '유저';
     const isOwnPost = p.author === m.avatar;
     const authorName = p.author === 'user' ? userName : characterName(room, p.author, p.authorName);
     const targetUserComment = job.replyToCommentId
@@ -1165,6 +1273,9 @@ function buildCommentMessages(job) {
         m.description ? `설명: ${m.description}` : '',
         m.personality ? `성격: ${m.personality}` : '',
         m.mesExample ? `말투 예시:\n${m.mesExample}` : '',
+        relationshipPersona?.description
+            ? `연결된 유저 페르소나: ${userName}\n${relationshipPersona.description}`
+            : '',
         '',
         isReply
             ? `네가 "${job.roomName}" 로그에 올린 게시물에 ${userName}가 댓글을 달았다. [반드시 답할 댓글]에 직접 답댓글을 단다.`

@@ -314,8 +314,22 @@ function othersBlock(post, member, excludeCommentId = null) {
     return `\n\n[이미 달린 댓글 — 겹치지 않게]\n${lines.join('\n')}`;
 }
 
-function postAuthorName(settings, room, post) {
-    if (post.author === 'user') return settings.userPersonaName || '유저';
+function relationshipPersona(settings, room, member) {
+    return room?.memberPersonas?.[member?.avatar]
+        || room?.persona
+        || {
+            name: settings.userPersonaName || '유저',
+            description: '',
+            avatar: null,
+        };
+}
+
+function postAuthorName(settings, room, post, member = null) {
+    if (post.author === 'user') {
+        return member
+            ? relationshipPersona(settings, room, member).name
+            : room?.persona?.name || settings.userPersonaName || '유저';
+    }
     return post.authorName
         || room.members.find(m => m.avatar === post.author)?.name
         || post.author;
@@ -327,20 +341,25 @@ async function generateComment(settings, room, post, member, options = {}) {
     if (!api) throw new Error('연결 프로필을 찾을 수 없음');
 
     const recent = readRecentChat(settings, member.name, 8);
+    const persona = relationshipPersona(settings, room, member);
+    const personaName = persona.name || '유저';
     const isOwnPost = post.author === member.avatar;
-    const authorName = postAuthorName(settings, room, post);
+    const authorName = postAuthorName(settings, room, post, member);
     const targetUserComment = options.replyToCommentId
         ? (post.comments || []).find(c => c.id === options.replyToCommentId && c.author === 'user')
         : [...(post.comments || [])].reverse().find(c => c.author === 'user');
     const isReply = isOwnPost && !!targetUserComment;
     const task = isReply
-        ? `네가 챗로그에 올린 게시물에 ${settings.userPersonaName || '유저'}가 댓글을 달았다. 아래에 [반드시 답할 댓글]로 표시된 바로 그 댓글에 답댓글을 단다.`
+        ? `네가 챗로그에 올린 게시물에 ${personaName}가 댓글을 달았다. 아래에 [반드시 답할 댓글]로 표시된 바로 그 댓글에 답댓글을 단다.`
         : `${authorName}가 챗로그에 올린 게시물에 댓글을 단다.`;
 
     const system = [
         `너는 "${member.name}"이다. 아래 인물을 완전히 연기한다.`,
         '',
         charBlock(member),
+        persona.description
+            ? `\n[이 캐릭터에게 연결된 유저 페르소나]\n이름: ${personaName}\n설명: ${persona.description}`
+            : '',
         recent ? `\n[최근 대화 — 말투와 관계만 참고]\n${recent}` : '',
         '',
         '지금 너는 "챗로그"라는 앱을 쓰고 있다. 친한 사람들끼리 하루 중 아무 순간이나 사진 한 장과 짧은 글로 올리는 앱이다.',
@@ -359,7 +378,7 @@ async function generateComment(settings, room, post, member, options = {}) {
 
     const user = [
         isReply
-            ? `[반드시 답할 댓글]\n${settings.userPersonaName || '유저'}: ${targetUserComment.text}`
+            ? `[반드시 답할 댓글]\n${personaName}: ${targetUserComment.text}`
             : '',
         isReply ? '\n아래 게시물 정보는 위 댓글에 답하는 데 필요한 경우에만 참고한다.' : '',
         `[${timeLabel(post.createdAt)}에 올라온 게시물]`,
@@ -396,7 +415,7 @@ async function generateReaction(settings, room, post, member) {
     if (!api) throw new Error('연결 프로필을 찾을 수 없음');
 
     const recent = readRecentChat(settings, member.name, 5);
-    const authorName = postAuthorName(settings, room, post);
+    const authorName = postAuthorName(settings, room, post, member);
     const system = [
         `너는 "${member.name}"이다. 아래 인물의 성격대로 반응한다.`,
         '',
@@ -431,8 +450,9 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
 
     const recent = readRecentChat(settings, member.name, 8);
     const forcePost = !!decision.forcePost;
-    const personaName = room.persona?.name || settings.userPersonaName || '유저';
-    const personaDescription = room.persona?.description || '';
+    const persona = relationshipPersona(settings, room, member);
+    const personaName = persona.name || settings.userPersonaName || '유저';
+    const personaDescription = persona.description || '';
     const temporal = seasonContext(slotAt);
 
     const system = [
@@ -532,7 +552,7 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
                 references.push({
                     role: 'user persona',
                     name: personaName,
-                    image: readPersonaAvatar(settings, room.persona?.avatar),
+                    image: readPersonaAvatar(settings, persona.avatar),
                 });
             }
             image = await generateImage(
@@ -540,7 +560,7 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
                 parsed.scene,
                 references,
                 member,
-                room.persona,
+                persona,
                 parsed.visualIdentity,
                 parsed.personaVisualIdentity,
                 `${temporal.label} (${temporal.seasonEn}), ${timeLabel(slotAt)}`,

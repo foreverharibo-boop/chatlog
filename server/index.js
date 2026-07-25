@@ -62,6 +62,7 @@ function loadAll() {
 
     for (const room of Object.values(db.rooms)) {
         room.slotHistory ??= [];
+        room.memberPersonas ??= {};
         room.schedule ??= {};
         room.schedule.maxSilenceHours ??= 12;
     }
@@ -395,13 +396,20 @@ async function init(router) {
     });
 
     router.post('/room', (req, res) => {
-        const { name, members = [], schedule = {}, persona = null } = req.body || {};
+        const {
+            name,
+            members = [],
+            schedule = {},
+            persona = null,
+            memberPersonas = {},
+        } = req.body || {};
         const normalizedMembers = members.map(member => ({
             ...member,
             name: cleanDisplayName(member.name || member.avatar),
         }));
         const room = {
-            id: uid('room'), name, members: normalizedMembers, persona, createdAt: Date.now(), paused: false,
+            id: uid('room'), name, members: normalizedMembers, persona, memberPersonas,
+            createdAt: Date.now(), paused: false,
             slotHistory: [],
             schedule: {
                 activeFrom: schedule.activeFrom ?? 8,
@@ -441,7 +449,7 @@ async function init(router) {
 
         const post = {
             id: uid('post'), roomId, author: 'user',
-            authorName: settings.userPersonaName || null,
+            authorName: room.persona?.name || settings.userPersonaName || null,
             slotAt: Date.now(), createdAt: Date.now(),
             text, image, imageSource: 'upload',
             read: true, comments: [], reactions: [],
@@ -527,7 +535,7 @@ async function init(router) {
         if (!text?.trim()) return res.status(400).json({ error: 'empty' });
 
         const userComment = {
-            id: uid('c'), author: 'user', authorName: null,
+            id: uid('c'), author: 'user', authorName: room.persona?.name || settings.userPersonaName || null,
             text: text.trim().slice(0, 200), createdAt: Date.now(), read: true,
         };
         post.comments.push(userComment);
@@ -557,7 +565,7 @@ async function init(router) {
         if (i >= 0) post.reactions.splice(i, 1);
         else post.reactions.push({
             author: 'user',
-            authorName: settings.userPersonaName || null,
+            authorName: db.rooms[roomId]?.persona?.name || settings.userPersonaName || null,
             emoji: emoji.trim().slice(0, 16),
             createdAt: Date.now(),
         });
