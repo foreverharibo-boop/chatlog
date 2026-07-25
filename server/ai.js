@@ -71,7 +71,8 @@ function readAvatar(settings, avatarFile) {
 // ── 최근 대화 읽기 ────────────────────────────────────────
 /**
  * data/<user>/chats/<캐릭터명>/ 안에서 가장 최근 .jsonl 을 열어 마지막 N개 발화를 뽑는다.
- * 캐릭터가 "요즘 뭐 하고 지내는지"를 컷에 반영하기 위한 것.
+ * 컷 생성에서는 말투와 유저와의 관계만 참고한다. 대화 속 유저의 행동을 캐릭터의
+ * 실제 일상으로 오인하지 않도록 발화 주체를 명시한다.
  */
 function readRecentChat(settings, charName, limit = 12) {
     if (!charName) return '';
@@ -98,7 +99,12 @@ function readRecentChat(settings, charName, limit = 12) {
             try {
                 const o = JSON.parse(line);
                 if (!o.mes) continue;                 // 첫 줄은 메타데이터
-                msgs.push(`${o.name}: ${String(o.mes).replace(/\s+/g, ' ').slice(0, 200)}`);
+                const speaker = o.is_user === true
+                    ? '유저'
+                    : o.name === charName
+                        ? `캐릭터(${charName})`
+                        : `다른 인물(${o.name || '알 수 없음'})`;
+                msgs.push(`${speaker}: ${String(o.mes).replace(/\s+/g, ' ').slice(0, 200)}`);
             } catch { /* 깨진 줄 무시 */ }
         }
         return msgs.slice(-limit).join('\n');
@@ -379,20 +385,35 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
     const api = resolveTextApi(settings);
     if (!api) throw new Error('연결 프로필을 찾을 수 없음');
 
-    const recent = readRecentChat(settings, member.name);
+    const recent = readRecentChat(settings, member.name, 8);
     const forcePost = !!decision.forcePost;
+    const personaName = room.persona?.name || settings.userPersonaName || '유저';
+    const personaDescription = room.persona?.description || '';
 
     const system = [
         `너는 "${member.name}"이다.`,
         '',
+        '[캐릭터 카드 — 일상·정체성 판단의 최우선 근거]',
         charBlock(member),
-        recent ? `\n[최근 대화 — 지금 이 인물이 처한 상황]\n${recent}` : '',
+        personaDescription
+            ? `\n[유저 페르소나 — "${member.name}"와는 별개의 인물]\n이름: ${personaName}\n설명: ${personaDescription}`
+            : `\n[유저 페르소나 — "${member.name}"와는 별개의 인물]\n이름: ${personaName}`,
+        recent ? `\n[최근 대화 발췌 — 현재 관계와 공유된 상황을 파악]\n${recent}` : '',
         '',
         '너는 "chatlog" 앱을 확인하고 있다. 이번 시간대에 게시물을 올릴지 먼저 결정한다.',
-        '단체 로그의 모든 인물이 매번 올릴 필요는 없다. 성격, 현재 상황, 최근 대화에 따라 독립적으로 결정한다.',
+        '단체 로그의 모든 인물이 매번 올릴 필요는 없다. 캐릭터 카드의 성격과 일상에 따라 독립적으로 결정한다.',
+        '',
+        '정보 우선순위와 주체 구분:',
+        '- 캐릭터 카드가 정체성, 성별, 외모, 직업, 성격, 생활 방식의 최우선 기준이다.',
+        '- 최근 대화에서는 두 사람의 현재 관계, 호칭, 감정, 공유 중인 사건과 각자의 상황을 적극적으로 파악한다.',
+        '- 최근 관계와 사건은 캐릭터의 일상 선택에 자연스럽게 영향을 줄 수 있다. 관계 맥락을 무조건 지우지 마라.',
+        '- 단, "유저:"가 한 행동과 유저의 신체 상태·직업·일정은 유저의 것이다. 캐릭터 본인의 것으로 바꾸지 마라.',
+        `- 유저 페르소나(${personaName})의 상황 때문에 캐릭터(${member.name})가 동행, 기다림, 준비, 걱정, 선물, 연락 등을 하는 장면은 가능하다. 각자의 역할만 정확히 유지한다.`,
+        `- 예: 유저 페르소나(${personaName})가 임신 중이라면 캐릭터(${member.name})가 산모 교실에 데려다주거나 밖에서 기다리는 장면은 가능하지만, 캐릭터(${member.name}) 본인이 임신했거나 산모인 것처럼 묘사하면 안 된다.`,
+        '- 캐릭터 카드에 없는 신체 상태·직업·가족관계를 캐릭터 본인에게 새로 부여하지 마라.',
         '',
         'JSON만 출력한다. 마크다운 코드펜스 금지.',
-        '{"post": true 또는 false, "caption": "올릴 때만 25자 이내 SNS 캡션", "scene": "올릴 때만 사진 장면을 영어로 묘사"}',
+        '{"post": true 또는 false, "caption": "캐릭터 시점의 25자 이내 SNS 캡션", "scene": "사진 장면을 영어로 묘사", "roleCheck": "캐릭터와 유저가 각각 무엇을 하는지 짧게 확인"}',
         '',
         '게시 여부 규칙:',
         forcePost
@@ -408,10 +429,18 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
         '- post가 false면 caption과 scene은 빈 문자열로 둔다.',
         '',
         'post가 true일 때 scene 규칙:',
-        '- 최근 대화 상황과 이어지는 장면이어야 한다. 뜬금없는 장소 금지.',
-        '- 이 시각에 이 인물이 실제로 있을 법한 곳, 실제로 보고 있을 법한 것.',
-        '- 폰으로 대충 찍은 스냅. 구도가 조금 어긋나도 좋다.',
-        '- 인물이 프레임에 들어와도 되고, 눈앞 풍경만 담아도 된다.',
+        '- 캐릭터 카드에 적힌 직업, 취미, 성격, 생활 방식과 최근 관계 상황이 자연스럽게 함께 드러나는 일상을 만든다.',
+        '- 최근 대화의 사건을 그대로 복사할 필요는 없지만, 지금 관계 때문에 캐릭터가 실제로 할 법한 선택과 행동은 반영한다.',
+        '- 이 시각에 이 캐릭터가 실제로 있을 법한 곳, 실제로 보고 있을 법한 것.',
+        `- scene은 사진을 올리는 사람이 "${member.name}"임을 전제로 쓴다. 인물이 나오면 이름 또는 "the male character", "his partner"처럼 역할을 명확히 적는다.`,
+        '- 장면의 모든 행동·직업·신체 상태가 누구의 것인지 roleCheck로 마지막 검증한다. 서로 뒤바뀌었으면 고쳐서 출력한다.',
+        '- caption도 캐릭터가 직접 쓴 말이어야 하며, 유저가 쓴 것처럼 시점을 바꾸지 마라.',
+        '- 사진 구도는 반드시 둘 중 하나다: (1) 사람이 전혀 없는 캐릭터 시점의 풍경·음식·물건 사진, (2) 게시 캐릭터가 직접 찍은 셀카.',
+        `- 사람이 한 명이라도 등장하면 게시 캐릭터(${member.name})도 반드시 프레임에 보이는 전면 카메라 셀카, 팔을 뻗은 셀카 또는 거울 셀카여야 한다.`,
+        '- 다른 사람이 함께 나오면 게시 캐릭터와 같이 찍은 그룹 셀카로 묘사한다.',
+        '- 제3자가 찍어준 사진, 멀리서 찍힌 전신 사진, 몰래 찍은 사진, 감시 카메라, 삼각대, 영화 스틸 같은 구도는 금지한다.',
+        `- 사람이 나오는 scene에는 반드시 "front-facing smartphone selfie taken by ${member.name}" 또는 "mirror selfie taken by ${member.name}"라고 명시한다.`,
+        '- 폰으로 방금 대충 찍어 바로 올린 스냅이어야 한다. 구도가 조금 어긋나도 좋다.',
         '- 조명·장소·사물을 구체적으로. 추상적 표현 금지.',
     ].filter(Boolean).join('\n');
 
@@ -439,7 +468,13 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
     let image = null;
     if (parsed.scene && settings.imageApiKey) {
         try {
-            image = await generateImage(settings, parsed.scene, readAvatar(settings, member.avatar));
+            image = await generateImage(
+                settings,
+                parsed.scene,
+                readAvatar(settings, member.avatar),
+                member,
+                room.persona,
+            );
         } catch (e) {
             console.error('[chatlog] 이미지 생성 실패:', e.message);
         }
@@ -449,12 +484,30 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
 }
 
 // ── 이미지 생성 ───────────────────────────────────────────
-async function generateImage(settings, scene, reference = null) {
-    let prompt = `${scene}. Casual amateur phone snapshot, natural available light, slightly imperfect framing, no text, no watermark.`;
+async function generateImage(settings, scene, reference = null, member = null, persona = null) {
+    let prompt = `${scene}. Casual amateur phone snapshot taken moments ago for an immediate social post, natural available light, slightly imperfect framing, no text, no watermark. If any person appears anywhere in the image, the photo must be a believable front-facing smartphone selfie, arm's-length selfie, or mirror selfie taken by the posting character, who must also be visibly present in frame. If multiple people appear, compose them together as a group selfie. Never use a third-person camera angle, candid observer view, tripod shot, surveillance view, cinematic still, or a photo taken by someone else. If no person appears, a normal first-person phone photo of scenery, food, or objects is allowed.`;
+
+    if (member) {
+        const identity = [
+            member.name && `Name: ${member.name}`,
+            member.description && `Character description: ${String(member.description).slice(0, 1200)}`,
+        ].filter(Boolean).join('. ');
+        if (identity) {
+            prompt += ` The person posting this photo is the character: ${identity}. Preserve the character's stated gender, age, occupation, appearance and physical identity.`;
+        }
+    }
+
+    if (persona?.name || persona?.description) {
+        const relationshipPerson = [
+            persona.name && `Name: ${persona.name}`,
+            persona.description && `Description: ${String(persona.description).slice(0, 800)}`,
+        ].filter(Boolean).join('. ');
+        prompt += ` A separate person in the relationship context is the user persona: ${relationshipPerson}. Their condition, job and actions may influence the scene, but never transfer those traits to the posting character. Keep both people's roles and bodies distinct.`;
+    }
 
     if (reference) {
         // 폴라로이드 패턴 — 프사를 외모 기준으로 고정
-        prompt += ' If a person appears in the frame, their face, hairstyle, hair color and outfit must match the attached reference image exactly. Do not invent a different person.';
+        prompt += ' If the character appears in the frame, their face, hairstyle, hair color and gender presentation must match the attached reference image and character description. Do not invent or substitute a different person.';
     }
 
     if (!settings.imageApiKey) throw new Error('이미지 API 키가 비어 있습니다');

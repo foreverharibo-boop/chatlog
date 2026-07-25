@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.6.4';
+const CHATLOG_VERSION = '0.6.7';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -73,15 +73,30 @@ function personaForRoom(room) {
 
     for (const [file, meta] of Object.entries(descs)) {
         if ((meta?.connections || []).some(matches)) {
-            return { file, name: names[file] || c.name1 || '나' };
+            return {
+                file,
+                name: names[file] || c.name1 || '나',
+                description: typeof meta === 'string'
+                    ? meta
+                    : (meta?.description || meta?.prompt || ''),
+            };
         }
     }
 
     // 연결된 페르소나 없음 → 현재 활성 페르소나
     const file = c.userAvatar || window.user_avatar || pu.default_persona;
-    if (file) return { file, name: names[file] || c.name1 || '나' };
+    if (file) {
+        const meta = descs[file];
+        return {
+            file,
+            name: names[file] || c.name1 || '나',
+            description: typeof meta === 'string'
+                ? meta
+                : (meta?.description || meta?.prompt || ''),
+        };
+    }
 
-    return { file: null, name: c.name1 || '나' };
+    return { file: null, name: c.name1 || '나', description: '' };
 }
 
 function userAvatarUrl(room) {
@@ -95,6 +110,41 @@ function avatarUrl(avatar, room) {
     return avatar === 'user'
         ? userAvatarUrl(room)
         : `/thumbnail?type=avatar&file=${encodeURIComponent(avatar)}`;
+}
+
+function characterSnapshot(ch, avatar = ch?.avatar) {
+    const data = ch?.data || {};
+    return {
+        avatar,
+        name: ch?.name ?? data.name ?? cleanDisplayName(avatar),
+        description: ch?.description ?? data.description ?? '',
+        personality: ch?.personality ?? data.personality ?? '',
+        scenario: ch?.scenario ?? data.scenario ?? '',
+        mesExample: ch?.mes_example ?? ch?.mesExample ?? data.mes_example ?? '',
+    };
+}
+
+async function syncRoomCharacterCards() {
+    const chars = ctx().characters || [];
+    if (!chars.length) return;
+
+    for (const room of Object.values(state.rooms || {})) {
+        const members = (room.members || []).map(old => {
+            const ch = chars.find(item => item.avatar === old.avatar);
+            return ch ? { ...old, ...characterSnapshot(ch, old.avatar) } : old;
+        });
+        const persona = personaForRoom({ ...room, members });
+        const personaSnapshot = {
+            name: persona.name,
+            description: persona.description || '',
+        };
+        const patch = {};
+        if (JSON.stringify(members) !== JSON.stringify(room.members || [])) patch.members = members;
+        if (JSON.stringify(personaSnapshot) !== JSON.stringify(room.persona || {})) patch.persona = personaSnapshot;
+        if (!Object.keys(patch).length) continue;
+        Object.assign(room, patch);
+        await api('/room/update', { roomId: room.id, ...patch });
+    }
 }
 
 // ── 상태 ──────────────────────────────────────────────────
@@ -417,6 +467,7 @@ function closeChatlog() { $overlay?.remove(); $overlay = null; }
 async function refresh() {
     try {
         state = await api('/state');
+        await syncRoomCharacterCards();
     } catch (e) {
         $('.chatlog-body').html(
             `<div class="chatlog-empty">서버 플러그인에 연결하지 못했어요<br>` +
@@ -983,17 +1034,16 @@ async function createRoomFlow() {
     const picked = $list.find('input:checked').map((_, el) => el.value).get();
     const members = picked.map(av => {
         const ch = chars.find(x => x.avatar === av) || {};
-        return {
-            avatar: av,
-            name: ch.name,
-            description: ch.description,
-            personality: ch.personality,
-            scenario: ch.scenario,
-            mesExample: ch.mes_example,
-        };
+        return characterSnapshot(ch, av);
     });
 
-    await api('/room', { name, members, schedule: defaultSchedule });
+    const persona = personaForRoom({ members });
+    await api('/room', {
+        name,
+        members,
+        schedule: defaultSchedule,
+        persona: { name: persona.name, description: persona.description || '' },
+    });
     refresh();
 }
 

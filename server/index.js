@@ -394,13 +394,13 @@ async function init(router) {
     });
 
     router.post('/room', (req, res) => {
-        const { name, members = [], schedule = {} } = req.body || {};
+        const { name, members = [], schedule = {}, persona = null } = req.body || {};
         const normalizedMembers = members.map(member => ({
             ...member,
             name: cleanDisplayName(member.name || member.avatar),
         }));
         const room = {
-            id: uid('room'), name, members: normalizedMembers, createdAt: Date.now(), paused: false,
+            id: uid('room'), name, members: normalizedMembers, persona, createdAt: Date.now(), paused: false,
             slotHistory: [],
             schedule: {
                 activeFrom: schedule.activeFrom ?? 8,
