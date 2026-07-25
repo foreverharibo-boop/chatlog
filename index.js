@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.4.1';
+const CHATLOG_VERSION = '0.4.2';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -33,27 +33,47 @@ function dayKey(ts) {
 }
 
 // ── 페르소나(유저) 아바타 — 현재 선택된 페르소나를 자동 추적 ──
-let userAvatarUrl = '/img/user-default.png';
+/**
+ * 캐릭터에 연결(락)된 페르소나 찾기 — 폴라로이드 방식.
+ * power_user.persona_descriptions 의 connections 에 방 멤버 캐릭터가 걸려 있으면
+ * 그 페르소나를 쓴다. 연결이 없으면 현재 활성 페르소나 → DOM 폴백.
+ */
+function personaForRoom(room) {
+    const c = ctx();
+    const pu = c.powerUserSettings || window.power_user || {};
+    const descs = pu.persona_descriptions || {};
+    const names = pu.personas || {};
+    const charAvatars = (room?.members || []).map(m => m.avatar);
 
-async function resolveUserAvatar() {
-    // 1) personas 모듈이 현재 페르소나 파일명을 export 함
-    try {
-        const mod = await import('/scripts/personas.js');
-        const file = mod?.user_avatar;
-        if (file) {
-            userAvatarUrl = `/User Avatars/${encodeURIComponent(file)}`;
-            return;
+    const matches = (conn) => {
+        if (!conn) return false;
+        const id = typeof conn === 'string' ? conn : (conn.id ?? conn.characterKey ?? conn.avatar);
+        return charAvatars.includes(id);
+    };
+
+    for (const [file, meta] of Object.entries(descs)) {
+        if ((meta?.connections || []).some(matches)) {
+            return { file, name: names[file] || c.name1 || '나' };
         }
-    } catch { /* 구버전 ST */ }
+    }
 
-    // 2) 폴백: 채팅에 렌더된 유저 메시지의 아바타 src 그대로
-    const domSrc = $('.mes[is_user="true"]').last().find('.avatar img').attr('src');
-    if (domSrc) userAvatarUrl = domSrc;
+    // 연결된 페르소나 없음 → 현재 활성 페르소나
+    const file = c.userAvatar || window.user_avatar || pu.default_persona;
+    if (file) return { file, name: names[file] || c.name1 || '나' };
+
+    return { file: null, name: c.name1 || '나' };
 }
 
-function avatarUrl(avatar) {
+function userAvatarUrl(room) {
+    const p = personaForRoom(room);
+    if (p.file) return `/User Avatars/${encodeURIComponent(p.file)}`;
+    const domSrc = $('.mes[is_user="true"]').last().find('.avatar img').attr('src');
+    return domSrc || '/img/user-default.png';
+}
+
+function avatarUrl(avatar, room) {
     return avatar === 'user'
-        ? userAvatarUrl
+        ? userAvatarUrl(room)
         : `/thumbnail?type=avatar&file=${encodeURIComponent(avatar)}`;
 }
 
@@ -349,7 +369,7 @@ function openChatlog() {
     $overlay.find('.chatlog-back').on('click', () => { view.screen = 'rooms'; render(); });
 
     view = { screen: 'rooms', roomId: null };
-    resolveUserAvatar().then(refresh);
+    refresh();
 }
 
 function closeChatlog() { $overlay?.remove(); $overlay = null; }
@@ -1058,12 +1078,10 @@ jQuery(async () => {
     // 연결 프로필 목록은 ST가 늦게 채우는 경우가 있어 몇 번 더 확인한다
     const c0 = ctx();
     if (c0.eventSource && c0.eventTypes?.APP_READY) {
-        c0.eventSource.on(c0.eventTypes.APP_READY, () => { refreshProfileSelect(); resolveUserAvatar(); });
+        c0.eventSource.on(c0.eventTypes.APP_READY, () => refreshProfileSelect());
     }
     if (c0.eventSource && c0.eventTypes?.SETTINGS_UPDATED) {
-        c0.eventSource.on(c0.eventTypes.SETTINGS_UPDATED, () => resolveUserAvatar());
     }
-    resolveUserAvatar();
     [500, 1500, 4000].forEach(ms => setTimeout(() => {
         if (getProfiles().length) refreshProfileSelect();
     }, ms));
