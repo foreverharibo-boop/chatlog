@@ -47,23 +47,47 @@ function loadJson(p, fallback) {
     try { return JSON.parse(fs.readFileSync(p, 'utf-8')); } catch { return fallback; }
 }
 
+function cleanDisplayName(value) {
+    let name = String(value || '').trim();
+    try { name = decodeURIComponent(name); } catch { /* 이미 일반 문자열 */ }
+    name = path.basename(name).replace(/\.(png|jpe?g|webp|gif|avif)$/i, '').trim();
+    return name || '캐릭터';
+}
+
 function loadAll() {
     db = loadJson(DATA_PATH, db);
     db.rooms ??= {}; db.posts ??= {}; db.jobs ??= [];
     settings = { ...settings, ...loadJson(SETTINGS_PATH, {}) };
 
+    for (const room of Object.values(db.rooms)) {
+        room.slotHistory ??= [];
+        room.schedule ??= {};
+        room.schedule.maxSilenceHours ??= 12;
+    }
+
     // 예전 버전에 저장된 캐릭터 게시물/반응도 표시 이름을 복구한다.
     for (const [roomId, posts] of Object.entries(db.posts)) {
         const room = db.rooms[roomId];
+        for (const member of room?.members || []) {
+            member.name = cleanDisplayName(member.name || member.avatar);
+        }
         for (const post of posts) {
             post.comments ??= [];
             post.reactions ??= [];
-            if (post.author !== 'user' && !post.authorName) {
-                post.authorName = room?.members?.find(m => m.avatar === post.author)?.name || post.author;
+            if (post.author !== 'user') {
+                const member = room?.members?.find(m => m.avatar === post.author);
+                post.authorName = cleanDisplayName(member?.name || post.authorName || post.author);
+            }
+            for (const comment of post.comments) {
+                if (comment.author !== 'user') {
+                    const member = room?.members?.find(m => m.avatar === comment.author);
+                    comment.authorName = cleanDisplayName(member?.name || comment.authorName || comment.author);
+                }
             }
             for (const reaction of post.reactions) {
-                if (reaction.author !== 'user' && !reaction.authorName) {
-                    reaction.authorName = room?.members?.find(m => m.avatar === reaction.author)?.name || reaction.author;
+                if (reaction.author !== 'user') {
+                    const member = room?.members?.find(m => m.avatar === reaction.author);
+                    reaction.authorName = cleanDisplayName(member?.name || reaction.authorName || reaction.author);
                 }
             }
         }
@@ -113,6 +137,42 @@ function computeNextSlot(room, from = Date.now()) {
     return next.getTime();
 }
 
+function recordSlot(room, slotAt) {
+    room.slotHistory ??= [];
+    if (!room.slotHistory.some(ts => Math.abs(ts - slotAt) < 60000)) {
+        room.slotHistory.push(slotAt);
+        room.slotHistory.sort((a, b) => a - b);
+        if (room.slotHistory.length > 500) room.slotHistory.splice(0, room.slotHistory.length - 500);
+    }
+}
+
+function activeHoursBetween(from, to, schedule = {}) {
+    if (!Number.isFinite(from) || !Number.isFinite(to)) return Infinity;
+    if (to <= from) return 0;
+
+    const activeFrom = schedule.activeFrom ?? 8;
+    const activeTo = schedule.activeTo ?? 24;
+    const cursor = new Date(from);
+    cursor.setHours(0, 0, 0, 0);
+    const lastDay = new Date(to);
+    lastDay.setHours(0, 0, 0, 0);
+
+    let totalMs = 0;
+    let guard = 0;
+    while (cursor <= lastDay) {
+        if (guard++ > 370) return Infinity;
+        const windowStart = new Date(cursor);
+        const windowEnd = new Date(cursor);
+        windowStart.setHours(activeFrom, 0, 0, 0);
+        windowEnd.setHours(activeTo, 0, 0, 0);
+        const overlapStart = Math.max(from, windowStart.getTime());
+        const overlapEnd = Math.min(to, windowEnd.getTime());
+        if (overlapEnd > overlapStart) totalMs += overlapEnd - overlapStart;
+        cursor.setDate(cursor.getDate() + 1);
+    }
+    return totalMs / 3600000;
+}
+
 // ── 작업 큐 ───────────────────────────────────────────────
 function enqueueComments(room, post) {
     const minMs = settings.commentDelayMinMin * 60000;
@@ -154,11 +214,15 @@ async function runJob(job) {
         if (!post) return;
         const member = findMember(room, job.charId);
         if (!member) return;
+        const text = await ai.generateComment(settings, room, post, member, {
+            replyToCommentId: job.replyToCommentId,
+        });
         post.comments.push({
             id: uid('c'),
             author: member.avatar,
             authorName: member.name,
-            text: await ai.generateComment(settings, room, post, member),
+            text,
+            replyTo: job.replyToCommentId || null,
             createdAt: Date.now(), read: false,
         });
     }
@@ -184,7 +248,24 @@ async function runJob(job) {
     if (job.type === 'cut') {
         const member = findMember(room, job.charId);
         if (!member) return;
-        const { text, image } = await ai.generateCharacterCut(settings, room, member, job.slotAt);
+        const previous = (db.posts[room.id] || [])
+            .filter(post => post.author === member.avatar)
+            .sort((a, b) => (b.slotAt ?? b.createdAt) - (a.slotAt ?? a.createdAt))[0];
+        const lastPostAt = previous?.slotAt ?? previous?.createdAt ?? room.createdAt;
+        const maxSilenceHours = Math.max(
+            room.schedule?.cutIntervalHours ?? 2,
+            room.schedule?.maxSilenceHours ?? 12,
+        );
+        const forcePost = !!job.forcePost
+            || activeHoursBetween(lastPostAt, job.slotAt, room.schedule) >= maxSilenceHours;
+        const result = await ai.generateCharacterCut(settings, room, member, job.slotAt, {
+            forcePost,
+            randomRoll: Math.floor(rand(0, 100)),
+            activeHoursSinceLastPost: activeHoursBetween(lastPostAt, job.slotAt, room.schedule),
+            maxSilenceHours,
+        });
+        if (result.skipped) return { status: 'skipped' };
+        const { text, image } = result;
         const post = {
             id: uid('post'), roomId: room.id, author: job.charId,
             authorName: member.name,
@@ -194,6 +275,7 @@ async function runJob(job) {
         };
         (db.posts[room.id] ??= []).push(post);
         enqueueReactions(room, post);
+        return { status: 'posted', post };
     }
 }
 
@@ -224,6 +306,12 @@ function runCleanup() {
             return false;
         });
     }
+    let removedSlots = 0;
+    for (const room of Object.values(db.rooms)) {
+        const before = (room.slotHistory || []).length;
+        room.slotHistory = (room.slotHistory || []).filter(ts => ts >= cutoffTs);
+        removedSlots += before - room.slotHistory.length;
+    }
 
     // 하루로그 내보내기 파일도 같이 정리
     const exportDir = path.join(ST_ROOT, 'public', 'user', 'images', 'chatlog', 'daylog');
@@ -234,8 +322,8 @@ function runCleanup() {
         }
     } catch { /* 폴더 없으면 무시 */ }
 
-    if (removed) {
-        console.log(`[chatlog] 자동 정리: ${removed}건 삭제`);
+    if (removed || removedSlots) {
+        console.log(`[chatlog] 자동 정리: 기록 ${removed}건, 빈 슬롯 ${removedSlots}건 삭제`);
         saveDb();
     }
 }
@@ -254,6 +342,7 @@ async function tick() {
             if (room.nextSlotAt > now) continue;
 
             const slotAt = room.nextSlotAt;
+            recordSlot(room, slotAt);
             for (const member of room.members) {
                 db.jobs.push({
                     id: uid('job'), type: 'cut', roomId: room.id, charId: member.avatar, slotAt,
@@ -306,12 +395,18 @@ async function init(router) {
 
     router.post('/room', (req, res) => {
         const { name, members = [], schedule = {} } = req.body || {};
+        const normalizedMembers = members.map(member => ({
+            ...member,
+            name: cleanDisplayName(member.name || member.avatar),
+        }));
         const room = {
-            id: uid('room'), name, members, createdAt: Date.now(), paused: false,
+            id: uid('room'), name, members: normalizedMembers, createdAt: Date.now(), paused: false,
+            slotHistory: [],
             schedule: {
                 activeFrom: schedule.activeFrom ?? 8,
                 activeTo: schedule.activeTo ?? 24,
                 cutIntervalHours: schedule.cutIntervalHours ?? 2,
+                maxSilenceHours: schedule.maxSilenceHours ?? 12,
                 jitter: schedule.jitter ?? true,
             },
         };
@@ -326,6 +421,12 @@ async function init(router) {
         const { roomId, ...patch } = req.body || {};
         const room = db.rooms[roomId];
         if (!room) return res.status(404).json({ error: 'room not found' });
+        if (patch.members) {
+            patch.members = patch.members.map(member => ({
+                ...member,
+                name: cleanDisplayName(member.name || member.avatar),
+            }));
+        }
         Object.assign(room, patch);
         if (patch.schedule) room.nextSlotAt = computeNextSlot(room);
         saveDb();
@@ -424,10 +525,11 @@ async function init(router) {
         if (!room || !post) return res.status(404).json({ error: 'post not found' });
         if (!text?.trim()) return res.status(400).json({ error: 'empty' });
 
-        post.comments.push({
+        const userComment = {
             id: uid('c'), author: 'user', authorName: null,
             text: text.trim().slice(0, 200), createdAt: Date.now(), read: true,
-        });
+        };
+        post.comments.push(userComment);
 
         if (post.author !== 'user') {
             const minMs = settings.commentDelayMinMin * 60000;
@@ -435,6 +537,7 @@ async function init(router) {
             db.jobs.push({
                 id: uid('job'), type: 'comment',
                 roomId, postId, charId: post.author,
+                replyToCommentId: userComment.id,
                 runAt: Date.now() + rand(minMs, maxMs),
             });
         }
@@ -500,7 +603,7 @@ async function init(router) {
         const rooms = roomId ? [db.rooms[roomId]].filter(Boolean) : Object.values(db.rooms);
         if (!rooms.length) return res.status(404).json({ error: 'room not found' });
 
-        const done = { comments: 0, reactions: 0, cuts: 0, errors: [] };
+        const done = { comments: 0, reactions: 0, cuts: 0, skipped: 0, errors: [] };
 
         for (const room of rooms) {
             // 1. 대기 중인 댓글 작업 즉시 실행
@@ -515,10 +618,19 @@ async function init(router) {
 
             // 2. 캐릭터 컷 지금 바로 생성 (스케줄 무시)
             if (what === 'all' || what === 'cut') {
+                const slotAt = Date.now();
+                recordSlot(room, slotAt);
                 for (const member of room.members) {
                     try {
-                        await runJob({ type: 'cut', roomId: room.id, charId: member.avatar, slotAt: Date.now() });
-                        done.cuts++;
+                        const result = await runJob({
+                            type: 'cut',
+                            roomId: room.id,
+                            charId: member.avatar,
+                            slotAt,
+                            forcePost: true,
+                        });
+                        if (result?.status === 'posted') done.cuts++;
+                        else done.skipped++;
                     } catch (e) { done.errors.push(`cut(${member.name}): ${e.message}`); }
                 }
             }

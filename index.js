@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.6.2';
+const CHATLOG_VERSION = '0.6.4';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -27,6 +27,19 @@ const showError = (message) => {
     if (window.toastr?.error) window.toastr.error(message);
     else window.alert(message);
 };
+
+function cleanDisplayName(value) {
+    let name = String(value || '').trim();
+    try { name = decodeURIComponent(name); } catch { /* 이미 일반 문자열 */ }
+    name = name.split(/[\\/]/).pop().replace(/\.(png|jpe?g|webp|gif|avif)$/i, '').trim();
+    return name || '캐릭터';
+}
+
+function characterName(room, avatar, storedName) {
+    if (avatar === 'user') return personaForRoom(room).name;
+    const member = room?.members?.find(m => m.avatar === avatar);
+    return cleanDisplayName(member?.name || storedName || avatar);
+}
 
 function timeLabel(ts) {
     const d = new Date(ts);
@@ -87,7 +100,13 @@ function avatarUrl(avatar, room) {
 // ── 상태 ──────────────────────────────────────────────────
 let state = { rooms: {}, posts: {} };
 let view = { screen: 'rooms', roomId: null };
-let defaultSchedule = { activeFrom: 8, activeTo: 24, cutIntervalHours: 2, jitter: true };
+let defaultSchedule = {
+    activeFrom: 8,
+    activeTo: 24,
+    cutIntervalHours: 2,
+    maxSilenceHours: 12,
+    jitter: true,
+};
 
 // ═══════════ 확장 탭 설정 ═══════════
 const SETTINGS_HTML = `
@@ -159,12 +178,18 @@ const SETTINGS_HTML = `
       </div>
       <small>이 시간 밖에서는 캐릭터가 아무것도 올리지 않습니다.</small>
 
-      <label for="chatlog-interval">캐릭터 업로드 간격 (시간)</label>
+      <label for="chatlog-interval">게시 판단 주기 (시간)</label>
       <input id="chatlog-interval" type="number" min="1" max="24" class="text_pole">
+      <small>이 주기마다 캐릭터가 성격과 상황에 따라 올릴지 건너뛸지 결정합니다.</small>
+
+      <label for="chatlog-max-silence">최대 게시 공백 (활동 시간)</label>
+      <input id="chatlog-max-silence" type="number" min="1" max="72" class="text_pole">
+      <small>이 시간만큼 오래 안 올린 캐릭터는 다음 슬롯에 반드시 올립니다.</small>
+
       <small id="chatlog-cost">비용 안내</small>
 
       <label class="checkbox_label">
-        <input id="chatlog-jitter" type="checkbox"><span>간격 흔들기 (±25%)</span>
+        <input id="chatlog-jitter" type="checkbox"><span>판정 시각 흔들기 (±25%)</span>
       </label>
 
       <hr>
@@ -300,10 +325,14 @@ async function loadSettingsUi() {
     $('#chatlog-cleandays').val(s.cleanupAfterDays);
     $('#chatlog-keepsaved').prop('checked', !!s.keepSaved);
 
-    defaultSchedule = JSON.parse(localStorage.getItem('chatlog_schedule') || 'null') || defaultSchedule;
+    defaultSchedule = {
+        ...defaultSchedule,
+        ...(JSON.parse(localStorage.getItem('chatlog_schedule') || 'null') || {}),
+    };
     $('#chatlog-active-from').val(defaultSchedule.activeFrom);
     $('#chatlog-active-to').val(defaultSchedule.activeTo);
     $('#chatlog-interval').val(defaultSchedule.cutIntervalHours);
+    $('#chatlog-max-silence').val(defaultSchedule.maxSilenceHours);
     $('#chatlog-jitter').prop('checked', defaultSchedule.jitter);
     updateCostHint();
 }
@@ -313,7 +342,7 @@ function updateCostHint() {
     const to = Number($('#chatlog-active-to').val()) || 24;
     const iv = Number($('#chatlog-interval').val()) || 2;
     const slots = Math.max(0, Math.floor((to - from) / iv));
-    $('#chatlog-cost').text(`하루 약 ${slots}슬롯 → 방 인원 1명당 이미지 ${slots}장/일.`);
+    $('#chatlog-cost').text(`하루 약 ${slots}번 판단 · 판단용 텍스트 요청은 인원마다, 이미지는 실제 게시자만 생성합니다.`);
 }
 
 async function saveSettingsUi() {
@@ -321,6 +350,10 @@ async function saveSettingsUi() {
         activeFrom: Number($('#chatlog-active-from').val()),
         activeTo: Number($('#chatlog-active-to').val()),
         cutIntervalHours: Number($('#chatlog-interval').val()),
+        maxSilenceHours: Math.max(
+            Number($('#chatlog-interval').val()),
+            Number($('#chatlog-max-silence').val()) || 12,
+        ),
         jitter: $('#chatlog-jitter').is(':checked'),
     };
     localStorage.setItem('chatlog_schedule', JSON.stringify(defaultSchedule));
@@ -439,18 +472,33 @@ const hhmm = (ts) => {
     const d = new Date(ts);
     return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
+const slotTimestamp = post => post.slotAt ?? post.createdAt;
+const dateFromDayKey = key => {
+    const [year, month, day] = String(key).split('-').map(Number);
+    return new Date(year, month - 1, day);
+};
 
 function feedState(room) {
     view.feed ??= {};
     const f = view.feed;
     const posts = (state.posts[room.id] || []).slice().sort((a, b) => a.createdAt - b.createdAt);
+    const isGroup = room.members.length > 1;
+    const recordedSlots = isGroup ? (room.slotHistory || []) : [];
 
-    const days = [...new Set(posts.map(p => dayKey(p.createdAt)))];
+    const days = [...new Set([
+        ...posts.map(p => dayKey(slotTimestamp(p))),
+        ...recordedSlots.map(dayKey),
+    ])];
+    days.sort((a, b) => dateFromDayKey(a) - dateFromDayKey(b));
     if (!days.includes(dayKey(Date.now()))) days.push(dayKey(Date.now()));
     if (!f.day || !days.includes(f.day)) f.day = days[days.length - 1];
 
-    const dayPosts = posts.filter(p => dayKey(p.createdAt) === f.day);
-    const slots = [...new Set(dayPosts.map(p => new Date(p.createdAt).getHours()))].sort((a, b) => a - b);
+    const dayPosts = posts.filter(p => dayKey(slotTimestamp(p)) === f.day);
+    const daySlotTimes = recordedSlots.filter(ts => dayKey(ts) === f.day);
+    const slots = [...new Set([
+        ...dayPosts.map(p => new Date(slotTimestamp(p)).getHours()),
+        ...daySlotTimes.map(ts => new Date(ts).getHours()),
+    ])].sort((a, b) => a - b);
     if (f.slot == null || !slots.includes(f.slot)) f.slot = slots[slots.length - 1];
 
     const people = [
@@ -461,48 +509,42 @@ function feedState(room) {
         },
         ...room.members.map(m => ({
             id: m.avatar,
-            name: m.name,
+            name: characterName(room, m.avatar, m.name),
             avatar: avatarUrl(m.avatar, room),
         })),
     ];
 
-    // 셋로그처럼 한 시간대 안에서도 참여자별 기록을 한 장씩 넘긴다.
-    // 같은 사람이 같은 시간에 여러 장을 올린 경우도 모두 별도 슬라이드로 보존한다.
-    const slides = [];
-    for (const hour of slots) {
-        const hourPosts = dayPosts.filter(p => new Date(p.createdAt).getHours() === hour);
+    // 넘김 단위는 게시물 한 장이 아니라 시간대 한 페이지다.
+    // 단톡방은 안 올린 참여자도 빈 슬롯으로 두어 같은 시간대를 한눈에 보여준다.
+    const pages = slots.map(hour => {
+        const hourPosts = dayPosts.filter(p => new Date(slotTimestamp(p)).getHours() === hour);
+        const pageSlotAt = daySlotTimes.find(ts => new Date(ts).getHours() === hour)
+            ?? slotTimestamp(hourPosts[0] || { createdAt: Date.now() });
+        const items = [];
         for (const person of people) {
             const ownPosts = hourPosts.filter(p => p.author === person.id);
             if (ownPosts.length) {
-                ownPosts.forEach((post, index) => slides.push({
+                ownPosts.forEach((post, index) => items.push({
                     key: `post:${post.id}`,
-                    hour,
                     kind: 'post',
                     post,
                     person,
                     duplicateIndex: index,
                 }));
-            } else {
-                slides.push({
+            } else if (isGroup) {
+                items.push({
                     key: `empty:${hour}:${person.id}`,
-                    hour,
                     kind: 'empty',
                     person,
-                    timestamp: hourPosts[0]?.createdAt ?? Date.now(),
+                    timestamp: pageSlotAt,
                 });
             }
         }
-    }
+        return { key: `hour:${hour}`, hour, items };
+    });
 
-    if (!slides.some(s => s.key === f.slideKey)) {
-        const latestPost = [...slides].reverse().find(s => s.kind === 'post');
-        f.slideKey = latestPost?.key || slides.at(-1)?.key || null;
-    }
-
-    const slideIndex = Math.max(0, slides.findIndex(s => s.key === f.slideKey));
-    if (slides[slideIndex]) f.slot = slides[slideIndex].hour;
-
-    return { posts, days, dayPosts, slots, slides, slideIndex, f };
+    const pageIndex = Math.max(0, pages.findIndex(page => page.hour === f.slot));
+    return { posts, days, dayPosts, slots, pages, pageIndex, f };
 }
 
 function renderFeed() {
@@ -512,11 +554,11 @@ function renderFeed() {
     $('.chatlog-title').text(room.name);
     const $b = $('.chatlog-body').empty();
 
-    const { days, dayPosts, slots, slides, slideIndex, f } = feedState(room);
+    const { days, dayPosts, slots, pages, pageIndex, f } = feedState(room);
 
     // 상단 바: 날짜 이동 + 올리기/하루로그
     const di = days.indexOf(f.day);
-    const dateLabel = new Date(dayPosts[0]?.createdAt ?? Date.now())
+    const dateLabel = dateFromDayKey(f.day)
         .toLocaleDateString('ko-KR', { month: 'long', day: 'numeric', weekday: 'short' });
     const $top = $(`
       <div class="chatlog-slotbar">
@@ -530,7 +572,6 @@ function renderFeed() {
         if (di > 0) {
             f.day = days[di - 1];
             f.slot = null;
-            f.slideKey = null;
             render();
         }
     });
@@ -538,7 +579,6 @@ function renderFeed() {
         if (di < days.length - 1) {
             f.day = days[di + 1];
             f.slot = null;
-            f.slideKey = null;
             render();
         }
     });
@@ -559,11 +599,7 @@ function renderFeed() {
             <span>${String(h).padStart(2, '0')}</span>
           </button>`);
         $d.on('click', () => {
-            const first = slides.find(s => s.hour === h && s.kind === 'post')
-                || slides.find(s => s.hour === h);
-            if (!first) return;
             f.slot = h;
-            f.slideKey = first.key;
             f.motion = 'jump';
             render();
         });
@@ -571,42 +607,43 @@ function renderFeed() {
     });
     $b.append($dots);
 
-    const current = slides[slideIndex];
-    if (!current) return;
+    const currentPage = pages[pageIndex];
+    if (!currentPage) return;
 
-    const sameHour = slides.filter(s => s.hour === current.hour);
-    const withinHour = sameHour.findIndex(s => s.key === current.key);
+    const postCount = currentPage.items.filter(item => item.kind === 'post').length;
+    const emptyCount = currentPage.items.filter(item => item.kind === 'empty').length;
     const $meta = $(`
       <div class="chatlog-slide-meta">
-        <b>${String(current.hour).padStart(2, '0')}:00</b>
-        <span>${withinHour + 1} / ${sameHour.length}</span>
+        <b>${String(currentPage.hour).padStart(2, '0')}:00</b>
+        <span>${postCount}개 기록${emptyCount ? ` · ${emptyCount}칸 비어 있음` : ''}</span>
       </div>`);
     $b.append($meta);
 
-    const goSlide = delta => {
-        const nextIndex = slideIndex + delta;
-        if (nextIndex < 0 || nextIndex >= slides.length) return;
-        f.slideKey = slides[nextIndex].key;
-        f.slot = slides[nextIndex].hour;
+    const goPage = delta => {
+        const nextIndex = pageIndex + delta;
+        if (nextIndex < 0 || nextIndex >= pages.length) return;
+        f.slot = pages[nextIndex].hour;
         f.motion = delta > 0 ? 'next' : 'prev';
         render();
     };
 
     const $stage = $(`<div class="chatlog-stage motion-${f.motion || 'none'}"></div>`);
-    try {
-        const $slide = current.kind === 'post'
-            ? slotCard(room, current.post)
-            : placeholderCard(current.person.name, current.person.avatar, current.timestamp);
-        addSlideNavigation($slide, {
-            canPrev: slideIndex > 0,
-            canNext: slideIndex < slides.length - 1,
-            onPrev: () => goSlide(-1),
-            onNext: () => goSlide(1),
-        });
-        $stage.append($slide);
-    } catch (e) {
-        console.error('[chatlog] 카드 렌더 실패', current.key, e);
-        $stage.append(`<div class="chatlog-rendererr">렌더 실패 (${esc(current.key)})<br>${esc(e.message)}</div>`);
+    for (const item of currentPage.items) {
+        try {
+            const $card = item.kind === 'post'
+                ? slotCard(room, item.post)
+                : placeholderCard(item.person.name, item.person.avatar, item.timestamp);
+            addSlideNavigation($card, {
+                canPrev: pageIndex > 0,
+                canNext: pageIndex < pages.length - 1,
+                onPrev: () => goPage(-1),
+                onNext: () => goPage(1),
+            });
+            $stage.append($card);
+        } catch (e) {
+            console.error('[chatlog] 카드 렌더 실패', item.key, e);
+            $stage.append(`<div class="chatlog-rendererr">렌더 실패 (${esc(item.key)})<br>${esc(e.message)}</div>`);
+        }
     }
     f.motion = 'none';
     $b.append($stage);
@@ -680,11 +717,11 @@ function addSlideNavigation($slide, { canPrev, canNext, onPrev, onNext }) {
 }
 
 function slotCard(room, p) {
-    const name = p.author === 'user' ? personaForRoom(room).name : (p.authorName || p.author);
+    const name = characterName(room, p.author, p.authorName);
     const reacts = (p.reactions || []).map(r => {
         const rname = r.author === 'user'
             ? personaForRoom(room).name
-            : (r.authorName || r.author);
+            : characterName(room, r.author, r.authorName);
         return `<span class="chatlog-react" title="${esc(rname)}">
           <img class="chatlog-ravatar" src="${avatarUrl(r.author, room)}" alt="">
           <span>${esc(r.emoji)}</span>
@@ -693,7 +730,7 @@ function slotCard(room, p) {
     const canReply = p.author !== 'user';
 
     const comments = p.comments.map(c => {
-        const cname = c.author === 'user' ? personaForRoom(room).name : (c.authorName || c.author);
+        const cname = characterName(room, c.author, c.authorName);
         return `
       <div class="chatlog-comment${c.read ? '' : ' unread'}">
         <img class="chatlog-cavatar" src="${avatarUrl(c.author, room)}">
@@ -764,10 +801,11 @@ function slotCard(room, p) {
 
 // ── 답장 시트 ─────────────────────────────────────────────
 function replySheet(room, post) {
+    const recipientName = characterName(room, post.author, post.authorName);
     const $sheet = $(`
       <div class="chatlog-sheet">
         <div class="chatlog-sheet-inner">
-          <div class="chatlog-sheet-title">${esc(post.authorName || post.author)}에게 답장</div>
+          <div class="chatlog-sheet-title">${esc(recipientName)}에게 답장</div>
           ${post.text ? `<div class="chatlog-replyquote">${esc(post.text)}</div>` : ''}
           <textarea class="chatlog-input" rows="2" maxlength="200" placeholder="답글 남기기"></textarea>
           <div class="chatlog-sheet-actions">
@@ -1020,10 +1058,11 @@ function buildCommentMessages(job) {
     const room = state.rooms[job.roomId];
     const userName = room ? personaForRoom(room).name : '유저';
     const isOwnPost = p.author === m.avatar;
-    const authorName = p.author === 'user'
-        ? userName
-        : (p.authorName || room?.members?.find(x => x.avatar === p.author)?.name || p.author);
-    const latestUserComment = [...(p.comments || [])].reverse().find(c => c.author === 'user');
+    const authorName = p.author === 'user' ? userName : characterName(room, p.author, p.authorName);
+    const targetUserComment = job.replyToCommentId
+        ? (p.comments || []).find(c => c.id === job.replyToCommentId && c.author === 'user')
+        : [...(p.comments || [])].reverse().find(c => c.author === 'user');
+    const isReply = isOwnPost && !!targetUserComment;
 
     const system = [
         `너는 "${m.name}"이다.`,
@@ -1031,19 +1070,21 @@ function buildCommentMessages(job) {
         m.personality ? `성격: ${m.personality}` : '',
         m.mesExample ? `말투 예시:\n${m.mesExample}` : '',
         '',
-        isOwnPost
-            ? `네가 "${job.roomName}" 로그에 올린 게시물에 ${userName}가 댓글을 달았다. 새 댓글이 아니라 그 댓글에 답댓글을 단다.`
+        isReply
+            ? `네가 "${job.roomName}" 로그에 올린 게시물에 ${userName}가 댓글을 달았다. [반드시 답할 댓글]에 직접 답댓글을 단다.`
             : `${authorName}가 "${job.roomName}" 로그에 올린 게시물에 댓글을 단다.`,
         COMMENT_RULES,
+        isReply ? '- 유저 댓글과 무관한 새 화제나 사진 속 인물·옷의 소유자·사건을 추측하지 마라.' : '',
     ].filter(Boolean).join('\n');
 
     const user = [
+        isReply ? `[반드시 답할 댓글]\n${userName}: ${targetUserComment.text}` : '',
+        isReply ? '아래 게시물은 답변에 필요한 경우에만 참고한다.' : '',
         `[${timeLabel(p.createdAt)} 게시물]`,
         p.text ? `글: ${p.text}` : '(글 없음)',
         p.image ? '(사진 첨부됨)' : '',
-        isOwnPost && latestUserComment ? `[답할 댓글]\n${userName}: ${latestUserComment.text}` : '',
         '',
-        isOwnPost ? '위 유저 댓글에 달 답댓글 하나만 출력하라.' : '댓글 하나만 출력하라.',
+        isReply ? '위 유저 댓글에 달 답댓글 하나만 출력하라.' : '댓글 하나만 출력하라.',
     ].filter(Boolean).join('\n');
 
     return [
@@ -1228,7 +1269,9 @@ function registerSlashCommands() {
         callback: async (args) => {
             await ensureState();
             const r = await api('/force', { what: args.what || 'all', roomId: roomIdByName(args.room) });
-            const msg = `댓글 ${r.comments}개, 반응 ${r.reactions || 0}개, 컷 ${r.cuts}개 생성` + (r.errors?.length ? ` / 오류 ${r.errors.length}건` : '');
+            const msg = `댓글 ${r.comments}개, 반응 ${r.reactions || 0}개, 컷 ${r.cuts}개 생성`
+                + (r.skipped ? `, ${r.skipped}개 건너뜀` : '')
+                + (r.errors?.length ? ` / 오류 ${r.errors.length}건` : '');
             toastr?.info?.(msg);
             if (r.errors?.length) console.warn('[chatlog]', r.errors);
             if ($overlay) refresh();

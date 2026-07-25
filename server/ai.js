@@ -255,10 +255,10 @@ function charBlock(member) {
     ].filter(Boolean).join('\n');
 }
 
-function othersBlock(post, member) {
+function othersBlock(post, member, excludeCommentId = null) {
     if (!post.comments?.length) return '';
     const lines = post.comments
-        .filter(c => c.author !== member.avatar)
+        .filter(c => c.author !== member.avatar && c.id !== excludeCommentId)
         .map(c => `${c.authorName || c.author}: ${c.text}`);
     if (!lines.length) return '';
     return `\n\n[이미 달린 댓글 — 겹치지 않게]\n${lines.join('\n')}`;
@@ -272,23 +272,26 @@ function postAuthorName(settings, room, post) {
 }
 
 // ── 댓글 생성 ─────────────────────────────────────────────
-async function generateComment(settings, room, post, member) {
+async function generateComment(settings, room, post, member, options = {}) {
     const api = resolveTextApi(settings);
     if (!api) throw new Error('연결 프로필을 찾을 수 없음');
 
     const recent = readRecentChat(settings, member.name, 8);
     const isOwnPost = post.author === member.avatar;
     const authorName = postAuthorName(settings, room, post);
-    const latestUserComment = [...(post.comments || [])].reverse().find(c => c.author === 'user');
-    const task = isOwnPost
-        ? `네가 챗로그에 올린 게시물에 ${settings.userPersonaName || '유저'}가 댓글을 달았다. 게시물에 새 댓글을 다는 게 아니라, 그 댓글에 답댓글을 단다.`
+    const targetUserComment = options.replyToCommentId
+        ? (post.comments || []).find(c => c.id === options.replyToCommentId && c.author === 'user')
+        : [...(post.comments || [])].reverse().find(c => c.author === 'user');
+    const isReply = isOwnPost && !!targetUserComment;
+    const task = isReply
+        ? `네가 챗로그에 올린 게시물에 ${settings.userPersonaName || '유저'}가 댓글을 달았다. 아래에 [반드시 답할 댓글]로 표시된 바로 그 댓글에 답댓글을 단다.`
         : `${authorName}가 챗로그에 올린 게시물에 댓글을 단다.`;
 
     const system = [
         `너는 "${member.name}"이다. 아래 인물을 완전히 연기한다.`,
         '',
         charBlock(member),
-        recent ? `\n[최근 대화 — 지금 둘 사이의 분위기]\n${recent}` : '',
+        recent ? `\n[최근 대화 — 말투와 관계만 참고]\n${recent}` : '',
         '',
         '지금 너는 "챗로그"라는 앱을 쓰고 있다. 친한 사람들끼리 하루 중 아무 순간이나 사진 한 장과 짧은 글로 올리는 앱이다.',
         task,
@@ -300,18 +303,21 @@ async function generateComment(settings, room, post, member) {
         '- 나레이션, 행동 묘사(*...*), 따옴표 금지. 댓글 텍스트만 출력한다.',
         '- 이름표나 접두사를 붙이지 마라.',
         '- 최근 대화의 분위기와 호칭을 유지하라.',
+        isReply ? '- 답댓글은 [반드시 답할 댓글]의 내용에 직접 대답하라.' : '',
+        isReply ? '- 유저 댓글과 무관한 새 화제를 꺼내거나, 사진 속 인물·옷의 소유자·사건을 추측하지 마라.' : '',
     ].filter(Boolean).join('\n');
 
     const user = [
+        isReply
+            ? `[반드시 답할 댓글]\n${settings.userPersonaName || '유저'}: ${targetUserComment.text}`
+            : '',
+        isReply ? '\n아래 게시물 정보는 위 댓글에 답하는 데 필요한 경우에만 참고한다.' : '',
         `[${timeLabel(post.createdAt)}에 올라온 게시물]`,
         post.text ? `글: ${post.text}` : '(글 없음)',
         post.image ? '(사진 첨부됨)' : '(사진 없음)',
-        isOwnPost && latestUserComment
-            ? `\n[답할 댓글]\n${settings.userPersonaName || '유저'}: ${latestUserComment.text}`
-            : '',
-        othersBlock(post, member),
+        othersBlock(post, member, targetUserComment?.id),
         '',
-        isOwnPost
+        isReply
             ? '위 유저 댓글에 달 답댓글 하나만 출력하라.'
             : '이 게시물에 달 댓글 하나만 출력하라.',
     ].filter(Boolean).join('\n');
@@ -369,11 +375,12 @@ async function generateReaction(settings, room, post, member) {
 }
 
 // ── 캐릭터 컷 생성 ────────────────────────────────────────
-async function generateCharacterCut(settings, room, member, slotAt) {
+async function generateCharacterCut(settings, room, member, slotAt, decision = {}) {
     const api = resolveTextApi(settings);
     if (!api) throw new Error('연결 프로필을 찾을 수 없음');
 
     const recent = readRecentChat(settings, member.name);
+    const forcePost = !!decision.forcePost;
 
     const system = [
         `너는 "${member.name}"이다.`,
@@ -381,13 +388,26 @@ async function generateCharacterCut(settings, room, member, slotAt) {
         charBlock(member),
         recent ? `\n[최근 대화 — 지금 이 인물이 처한 상황]\n${recent}` : '',
         '',
-        '너는 "chatlog" 앱에 지금 이 순간을 올리려고 한다. 잘 찍은 사진이 아니라,',
-        '눈앞에 있는 걸 대충 한 장 찍어 올리는 앱이다.',
+        '너는 "chatlog" 앱을 확인하고 있다. 이번 시간대에 게시물을 올릴지 먼저 결정한다.',
+        '단체 로그의 모든 인물이 매번 올릴 필요는 없다. 성격, 현재 상황, 최근 대화에 따라 독립적으로 결정한다.',
         '',
         'JSON만 출력한다. 마크다운 코드펜스 금지.',
-        '{"caption": "올릴 글 (25자 이내, SNS 캡션 말투)", "scene": "사진에 담길 장면을 영어로 묘사한 이미지 프롬프트"}',
+        '{"post": true 또는 false, "caption": "올릴 때만 25자 이내 SNS 캡션", "scene": "올릴 때만 사진 장면을 영어로 묘사"}',
         '',
-        'scene 규칙:',
+        '게시 여부 규칙:',
+        forcePost
+            ? '- 최대 공백에 도달했으므로 이번에는 반드시 post를 true로 한다.'
+            : '- 과시적·사교적·공유를 즐기는 성격은 자주, 과묵·사적·바쁜 성격은 드물게 올린다.',
+        forcePost
+            ? ''
+            : '- 성격에 맞춰 게시 기준을 고른다: 공유를 매우 즐김 30, 보통 55, 과묵·내향적 75, 매우 사적·바쁨 85.',
+        forcePost
+            ? ''
+            : '- 랜덤 게시 충동이 선택한 기준 이상일 때만 post를 true로 한다.',
+        '- 지금 실제로 찍어 공유할 만한 순간이 없으면 post는 false다.',
+        '- post가 false면 caption과 scene은 빈 문자열로 둔다.',
+        '',
+        'post가 true일 때 scene 규칙:',
         '- 최근 대화 상황과 이어지는 장면이어야 한다. 뜬금없는 장소 금지.',
         '- 이 시각에 이 인물이 실제로 있을 법한 곳, 실제로 보고 있을 법한 것.',
         '- 폰으로 대충 찍은 스냅. 구도가 조금 어긋나도 좋다.',
@@ -397,11 +417,21 @@ async function generateCharacterCut(settings, room, member, slotAt) {
 
     const user = [
         `지금은 ${timeLabel(slotAt)}이다.`,
-        '이 시각에 너는 어디서 뭘 하고 있나? JSON으로 답하라.',
+        `이번 랜덤 게시 충동은 ${decision.randomRoll ?? 50}/99이다.`,
+        `활동 시간 기준 마지막 게시 후 약 ${Number(decision.activeHoursSinceLastPost || 0).toFixed(1)}시간 지났다.`,
+        forcePost
+            ? '이번에는 반드시 올린다. 무엇을 찍어 올릴지 JSON으로 답하라.'
+            : '이 시각에 정말 올릴지, 건너뛸지 캐릭터답게 결정해 JSON으로 답하라.',
     ].join('\n');
 
     const raw = await callText(api, { system, user, json: true });
-    const parsed = extractJson(raw) || { caption: '', scene: '' };
+    const parsed = extractJson(raw);
+    if (!parsed) throw new Error('게시 여부 JSON 파싱 실패');
+
+    const shouldPost = forcePost || parsed.post === true || parsed.post === 'true';
+    if (!shouldPost) {
+        return { skipped: true, text: '', image: null };
+    }
     if (!parsed.scene) {
         console.warn('[chatlog] scene 파싱 실패, 원문:', String(raw).slice(0, 200));
     }
@@ -415,7 +445,7 @@ async function generateCharacterCut(settings, room, member, slotAt) {
         }
     }
 
-    return { text: (parsed.caption || '').slice(0, 60), image };
+    return { skipped: false, text: (parsed.caption || '').slice(0, 60), image };
 }
 
 // ── 이미지 생성 ───────────────────────────────────────────

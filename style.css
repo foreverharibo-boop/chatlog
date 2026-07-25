@@ -634,7 +634,7 @@ html > .chatlog-sheet * {
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.14);
 }
 
-/* 한 장씩 넘기는 셋로그형 뷰어 */
+/* 시간대별로 넘기는 셋로그형 뷰어 */
 .chatlog-slide-meta {
     display: flex;
     align-items: baseline;
@@ -651,8 +651,10 @@ html > .chatlog-sheet * {
 
 .chatlog-stage {
     position: relative;
-    overflow: hidden;
-    border-radius: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    overflow: visible;
     touch-action: pan-y;
     min-height: 240px;
 }

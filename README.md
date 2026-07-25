@@ -21,7 +21,7 @@ server/  →  SillyTavern/plugins/chatlog/
 확장 탭 → chatlog
 - 연결 프로필 (텍스트 생성)
 - 이미지 API 키 (별도)
-- 활동 시간대 / 업로드 간격 / 댓글 지연
+- 활동 시간대 / 게시 판단 주기 / 최대 게시 공백 / 댓글 지연
 
 ---
 
