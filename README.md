@@ -199,3 +199,12 @@ public/user/images/chatlog/     # 생성된 이미지
 - 이미지 생성도 같은 URL 빌더를 사용하며 챗로그에 저장된 이미지 프로젝트 ID와 리전을 적용
 - 설정 화면에 이미지 프로젝트 ID와 리전 입력란을 다시 표시
 - 프로젝트 ID가 비어 있으면 잘못된 요청을 보내지 않고 원인을 바로 표시
+
+## v0.7.11 수정
+
+- Gemini 3.x 텍스트 모델은 `thinkingLevel`을 사용하도록 수정
+- Gemini 3.5 Flash 등 Flash 계열은 `minimal`, Pro 계열은 `low`로 제한
+- Gemini 2.5 Flash·Flash-Lite에만 `thinkingBudget: 0` 적용
+- Gemini 3.x에서 비권장 샘플링 온도 제거 및 JSON 출력 여유를 4096토큰으로 확대
+- 앞뒤 설명과 문자열 속 중괄호가 섞인 응답에서도 완전한 JSON 객체를 찾아내도록 파서 보강
+- `cl.debug()`에 모델·종료 이유·응답 원문·토큰 사용량을 기록해 파싱 실패 원인 확인 가능

@@ -85,7 +85,7 @@ function loadAll() {
     db.runtime.skippedMissedSlots ??= 0;
     for (const job of db.jobs) job.attempts ??= 0;
     settings = { ...settings, ...loadJson(SETTINGS_PATH, {}) };
-    // v0.7.10: 텍스트는 ST 프로필, 이미지는 별도 Vertex Express 설정만 사용한다.
+    // v0.7.11: 텍스트는 ST 프로필, 이미지는 별도 Vertex Express 설정만 사용한다.
     settings.textMode = 'profile';
     settings.imageProvider = 'vertex';
 

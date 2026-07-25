@@ -404,23 +404,55 @@ function pushDebug(entry) {
 }
 function getDebug() { return lastDebug; }
 
+function geminiGenerationConfig(model, wantJson = false) {
+    const name = String(model || '').toLowerCase();
+    const isGemini3 = /^gemini-3(?:[.-]|$)/.test(name);
+    const isGemini3Flash = /^gemini-3(?:\.\d+)?-flash/.test(name);
+    const isGemini25Flash = /^gemini-2\.5-flash(?:-lite)?(?:-|$)/.test(name);
+    const config = {
+        maxOutputTokens: isGemini3 ? 4096 : 2048,
+    };
+
+    if (!isGemini3) config.temperature = 1.0;
+    if (wantJson) config.responseMimeType = 'application/json';
+
+    if (isGemini3) {
+        // Gemini 3.x는 숫자 budget보다 thinkingLevel을 권장한다.
+        // Flash 계열은 minimal, minimal 미지원 가능성이 있는 Pro 계열은 low를 쓴다.
+        config.thinkingConfig = {
+            thinkingLevel: isGemini3Flash ? 'minimal' : 'low',
+        };
+    } else if (isGemini25Flash) {
+        config.thinkingConfig = { thinkingBudget: 0 };
+    }
+
+    return config;
+}
+
 async function callGemini(api, { system, user, image, json: wantJson }) {
     const parts = [{ text: user }];
     if (image) parts.push({ inline_data: { mime_type: image.mime, data: image.data } });
 
-    const generationConfig = { temperature: 1.0, maxOutputTokens: 2048 };
-    if (wantJson) generationConfig.responseMimeType = 'application/json';
-    // gemini-2.5 계열은 thinking이 기본 ON — 출력 토큰을 생각에 다 쓰고 빈 답을 주는 원인.
-    if (/2\.5/.test(api.model || '')) {
-        generationConfig.thinkingConfig = { thinkingBudget: 0 };
-    }
+    const generationConfig = geminiGenerationConfig(api.model, wantJson);
 
     const json = await callVertexProfile(api, {
         system_instruction: { parts: [{ text: system }] },
         contents: [{ role: 'user', parts }],
         generationConfig,
     });
-    return json?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '';
+    const candidate = json?.candidates?.[0];
+    const text = candidate?.content?.parts
+        ?.filter(part => part?.thought !== true)
+        .map(part => part?.text || '')
+        .join('') || '';
+    pushDebug({
+        type: wantJson ? 'json-text' : 'text',
+        model: api.model,
+        finishReason: candidate?.finishReason || '',
+        output: text.slice(0, 5000),
+        usage: json?.usageMetadata || null,
+    });
+    return text;
 }
 
 async function callOpenAiCompatible(api, { system, user, image }) {
@@ -467,14 +499,36 @@ async function callText(api, payload) {
 function extractJson(raw) {
     if (!raw) return null;
     const text = String(raw).replace(/```[a-z]*\n?/gi, '').trim();
-    const start = text.indexOf('{');
-    const end = text.lastIndexOf('}');
-    if (start < 0 || end <= start) return null;
-    try {
-        return JSON.parse(text.slice(start, end + 1));
-    } catch {
-        return null;
+
+    // 앞뒤 설명이나 여러 중괄호가 섞여도 첫 번째 완전한 JSON 객체를 찾는다.
+    for (let start = text.indexOf('{'); start >= 0; start = text.indexOf('{', start + 1)) {
+        let depth = 0;
+        let inString = false;
+        let escaped = false;
+        for (let index = start; index < text.length; index += 1) {
+            const char = text[index];
+            if (inString) {
+                if (escaped) escaped = false;
+                else if (char === '\\') escaped = true;
+                else if (char === '"') inString = false;
+                continue;
+            }
+            if (char === '"') {
+                inString = true;
+                continue;
+            }
+            if (char === '{') depth += 1;
+            if (char !== '}') continue;
+            depth -= 1;
+            if (depth !== 0) continue;
+            try {
+                return JSON.parse(text.slice(start, index + 1));
+            } catch {
+                break;
+            }
+        }
     }
+    return null;
 }
 
 // ── 프롬프트 ──────────────────────────────────────────────
@@ -746,7 +800,14 @@ async function generateEngagement(settings, room, post, member, options = {}) {
         json: true,
     });
     const parsed = extractJson(raw);
-    if (!parsed) throw new Error('댓글·반응 JSON 파싱 실패');
+    if (!parsed) {
+        const detail = raw && !String(raw).includes('}')
+            ? '응답이 중간에 잘림'
+            : raw
+                ? 'JSON 형식 오류'
+                : '빈 응답';
+        throw new Error(`댓글·반응 JSON 파싱 실패 (${detail})`);
+    }
     const emoji = REACTION_EMOJIS.find(item => String(parsed.emoji).includes(item)) || '👍';
     return {
         comment: commentWanted ? cleanGeneratedComment(parsed.comment) : '',
@@ -839,7 +900,14 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
 
     const raw = await callText(api, { system, user, json: true });
     const parsed = extractJson(raw);
-    if (!parsed) throw new Error('게시 여부 JSON 파싱 실패');
+    if (!parsed) {
+        const detail = raw && !String(raw).includes('}')
+            ? '응답이 중간에 잘림'
+            : raw
+                ? 'JSON 형식 오류'
+                : '빈 응답';
+        throw new Error(`게시 여부 JSON 파싱 실패 (${detail})`);
+    }
 
     const shouldPost = forcePost || parsed.post === true || parsed.post === 'true';
     if (!shouldPost) {
@@ -1034,6 +1102,8 @@ module.exports = {
     readPersonaAvatar,
     readRecentChat,
     getDebug,
+    geminiGenerationConfig,
+    extractJson,
     generateComment,
     generateReaction,
     generateEngagement,
