@@ -5,6 +5,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { findSillyTavernRoot } = require('./paths');
 
 // ai.js 는 핫 리로드 대상 — 캐시를 비우면 서버 재시작 없이 새 코드가 먹는다
 let _ai = require('./ai');
@@ -21,8 +22,8 @@ const TICK_MS = 60 * 1000;
 const MISSED_SLOT_GRACE_MS = 30 * 60 * 1000;
 const RETRY_DELAYS_MS = [10, 30, 60].map(minutes => minutes * 60 * 1000);
 
-// ST 루트 (plugins/chatlog 에서 두 단계 위)
-const ST_ROOT = path.resolve(__dirname, '..', '..');
+// 심볼릭 링크 설치에서도 실제 server.js가 있는 ST 루트를 찾는다.
+const ST_ROOT = findSillyTavernRoot();
 
 // ── 저장소 ────────────────────────────────────────────────
 let db = {

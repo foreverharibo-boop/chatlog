@@ -36,7 +36,7 @@ STAMP="$(date +%Y%m%d-%H%M%S)-$$"
 PLUGIN_BACKUP="$ST_ROOT/plugins/chatlog-backup-$STAMP"
 CONFIG_BACKUP="$ST_ROOT/config.yaml.chatlog-backup-$STAMP"
 
-if [ ! -f "$ST_ROOT/server.js" ] || [ ! -f "$SOURCE/index.js" ]; then
+if [ ! -f "$ST_ROOT/server.js" ] || [ ! -f "$SOURCE/index.js" ] || [ ! -f "$SOURCE/paths.js" ]; then
     printf 'SillyTavern 또는 챗로그 서버 파일을 확인할 수 없습니다.\n'
     exit 1
 fi
@@ -103,6 +103,7 @@ fi
 
 node --check "$SOURCE/index.js"
 node --check "$SOURCE/ai.js"
+node --check "$SOURCE/paths.js"
 
 printf '\n설치가 완료되었습니다.\n'
 printf 'config.yaml 백업: %s\n' "$CONFIG_BACKUP"

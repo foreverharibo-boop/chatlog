@@ -51,6 +51,9 @@ if (-not (Test-Path -LiteralPath (Join-Path $StRoot "server.js"))) {
 if (-not (Test-Path -LiteralPath (Join-Path $Source "index.js"))) {
     throw "챗로그 server/index.js를 찾지 못했습니다: $Source"
 }
+if (-not (Test-Path -LiteralPath (Join-Path $Source "paths.js"))) {
+    throw "챗로그 server/paths.js를 찾지 못했습니다: $Source"
+}
 if (-not (Test-Path -LiteralPath $Config)) {
     throw "config.yaml이 없습니다. SillyTavern을 한 번 실행한 뒤 다시 시도하세요."
 }
@@ -134,6 +137,8 @@ Write-Utf8NoBom -Path $Config -Content $ConfigText
 if ($LASTEXITCODE -ne 0) { throw "server/index.js 문법 검사에 실패했습니다." }
 & node --check (Join-Path $Source "ai.js")
 if ($LASTEXITCODE -ne 0) { throw "server/ai.js 문법 검사에 실패했습니다." }
+& node --check (Join-Path $Source "paths.js")
+if ($LASTEXITCODE -ne 0) { throw "server/paths.js 문법 검사에 실패했습니다." }
 
 Write-Host ""
 Write-Host "설치가 완료되었습니다."

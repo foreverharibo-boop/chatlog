@@ -6,8 +6,9 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { findSillyTavernRoot } = require('./paths');
 
-const ST_ROOT = path.resolve(__dirname, '..', '..');
+const ST_ROOT = findSillyTavernRoot();
 const DATA_ROOT = path.resolve(ST_ROOT, 'data');
 const PUBLIC_ROOT = path.resolve(ST_ROOT, 'public');
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.avif']);
@@ -95,7 +96,12 @@ function resolveProfileApi(settings, profileName, kind = 'text') {
     const stSettings = loadJson(path.join(userDir, 'settings.json'), {});
     const secrets = loadJson(path.join(userDir, 'secrets.json'), {});
 
-    const profiles = stSettings?.extension_settings?.connectionManager?.profiles || [];
+    const connectionManager = stSettings?.extension_settings?.connectionManager
+        || stSettings?.extension_settings?.['connection-manager']
+        || {};
+    const profiles = Array.isArray(connectionManager.profiles)
+        ? connectionManager.profiles
+        : [];
     const profile = profiles.find(p => p.name === profileName)
         || (!profileName && kind === 'image'
             ? profiles.find(p => (p?.['api-source'] || p?.api) === 'vertexai')
@@ -174,8 +180,38 @@ function resolveProfileApi(settings, profileName, kind = 'text') {
     };
 }
 
+function activeProfileName(settings) {
+    const userDir = userDataDir(settings);
+    const stSettings = loadJson(path.join(userDir, 'settings.json'), {});
+    const connectionManager = stSettings?.extension_settings?.connectionManager
+        || stSettings?.extension_settings?.['connection-manager']
+        || {};
+    const profiles = Array.isArray(connectionManager.profiles)
+        ? connectionManager.profiles
+        : [];
+    const selected = connectionManager.selectedProfile
+        ?? connectionManager.selected_profile
+        ?? connectionManager.activeProfile
+        ?? '';
+    const selectedId = typeof selected === 'object'
+        ? selected?.id ?? selected?.name ?? ''
+        : selected;
+    const active = profiles.find(profile =>
+        String(profile?.id) === String(selectedId)
+        || String(profile?.name) === String(selectedId));
+    return active?.name || '';
+}
+
 function resolveTextApi(settings) {
-    // 텍스트는 반드시 사용자가 고른 ST 연결 프로필에서 해석한다.
+    // 브라우저가 닫혀 있어도 ST가 저장한 현재 활성 프로필을 서버가 직접 읽는다.
+    if (settings?.followActiveProfile !== false) {
+        const activeName = activeProfileName(settings);
+        const activeApi = activeName
+            ? resolveProfileApi(settings, activeName)
+            : null;
+        if (activeApi) return activeApi;
+    }
+    // 현재 활성 프로필을 읽지 못하면 챗로그에 마지막으로 저장된 프로필로 폴백한다.
     return resolveProfileApi(settings, settings.profileName);
 }
 
@@ -1921,6 +1957,7 @@ module.exports = {
     safeUserHandle,
     userDataDir,
     resolveProfileApi,
+    activeProfileName,
     resolveTextApi,
     resolveImageApi,
     googleUrl,
