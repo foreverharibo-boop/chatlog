@@ -682,7 +682,7 @@ function charBlock(member) {
 
 const RELATION_TYPES = new Set([
     'romantic', 'spouse', 'ex', 'family', 'friend', 'close_friend',
-    'rival', 'colleague', 'acquaintance', 'hostile', 'unknown',
+    'rival', 'colleague', 'acquaintance', 'hostile', 'custom', 'unknown',
 ]);
 
 function truncateContext(value, max = 4000) {
@@ -725,6 +725,7 @@ function relationTypeLabel(type) {
         colleague: '동료',
         acquaintance: '지인',
         hostile: '적대 관계',
+        custom: '직접 입력',
         unknown: '관계 불명',
     }[type] || '관계 불명';
 }

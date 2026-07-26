@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.8.0';
+const CHATLOG_VERSION = '0.8.1';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -27,24 +27,6 @@ const showError = (message) => {
     if (window.toastr?.error) window.toastr.error(message);
     else window.alert(message);
 };
-
-function promoteToastContainer() {
-    const container = document.getElementById('toast-container');
-    if (!container) return;
-    if (container.parentElement !== document.documentElement) {
-        document.documentElement.appendChild(container);
-    }
-    container.classList.add('chatlog-toast-portal');
-    container.style.setProperty('z-index', '2147483647', 'important');
-}
-
-function installToastPortal() {
-    if (window.__chatlogToastPortalInstalled) return;
-    window.__chatlogToastPortalInstalled = true;
-    const observer = new MutationObserver(() => promoteToastContainer());
-    observer.observe(document.documentElement, { childList: true, subtree: true });
-    promoteToastContainer();
-}
 
 function cleanDisplayName(value) {
     let name = String(value || '').trim();
@@ -815,8 +797,8 @@ function mountChatlog(loadError = null) {
         </div>
       </div>`);
 
-    // MovingUI가 body에 transform을 걸어 fixed를 깨뜨리므로 <html>에 직접 붙인다.
-    document.documentElement.appendChild($overlay[0]);
+    // 공식 토스트와 동일한 최상위 body 레이어에서 z-index로 순서를 정한다.
+    document.body.appendChild($overlay[0]);
 
     $overlay.on('click', e => { if (e.target === $overlay[0]) closeChatlog(); });
     $overlay.find('.chatlog-close').on('click', closeChatlog);
@@ -1322,7 +1304,7 @@ function replySheet(room, post) {
           </div>
         </div>
       </div>`);
-    document.documentElement.appendChild($sheet[0]);
+    document.body.appendChild($sheet[0]);
 
     const close = () => $sheet.remove();
     $sheet.on('click', e => { if (e.target === $sheet[0]) close(); });
@@ -1368,7 +1350,7 @@ function uploadSheet(room) {
         </div>
       </div>`);
 
-    document.documentElement.appendChild($sheet[0]);
+    document.body.appendChild($sheet[0]);
 
     let imageData = null;
     const readSelectedImage = function () {
@@ -1477,7 +1459,7 @@ function dayLogView(room, selectedDay = dayKey(Date.now())) {
           <div class="chatlog-progress"></div>
         </div>
       </div>`);
-    document.documentElement.appendChild($sheet[0]);
+    document.body.appendChild($sheet[0]);
 
     const $grid = $sheet.find('.chatlog-grid');
     const n = posts.length;
@@ -1640,6 +1622,7 @@ async function refreshRoomRelationships(room, button = null, options = {}) {
 
 const RELATION_OPTIONS = [
     ['unknown', '미설정'],
+    ['custom', '직접 입력'],
     ['spouse', '배우자'],
     ['romantic', '연인'],
     ['family', '가족'],
@@ -1668,16 +1651,14 @@ async function editRoomRelationships(room, options = {}) {
             저장한 관계는 AI 분석보다 우선하며 다른 페르소나의 관계가 섞이지 않아요.
           </div>
           <div class="chatlog-relation-list"></div>
-          <div class="chatlog-relation-tools">
+          <div class="chatlog-relation-footer">
             <button type="button" class="menu_button chatlog-relation-ai">AI 제안으로 채우기</button>
-          </div>
-          <div class="chatlog-sheet-actions">
-            <div class="menu_button chatlog-cancel">나중에</div>
-            <div class="menu_button chatlog-relation-save">관계 저장</div>
+            <button type="button" class="menu_button chatlog-cancel">나중에</button>
+            <button type="button" class="menu_button chatlog-relation-save">관계 저장</button>
           </div>
         </div>
       </div>`);
-    document.documentElement.appendChild($sheet[0]);
+    document.body.appendChild($sheet[0]);
     const $list = $sheet.find('.chatlog-relation-list');
 
     for (const member of room.members || []) {
@@ -1694,6 +1675,12 @@ async function editRoomRelationships(room, options = {}) {
                     `<option value="${value}"${value === (relation.type || 'unknown') ? ' selected' : ''}>${label}</option>`).join('')}
               </select>
             </label>
+            <label class="chatlog-custom-relation"${relation.type === 'custom' ? '' : ' style="display:none"'}>
+              직접 입력한 관계
+              <input class="chatlog-relation-label" maxlength="80"
+                placeholder="예: 보호자와 피보호자, 소꿉친구, 의형제"
+                value="${esc(relation.type === 'custom' ? relation.label || '' : '')}">
+            </label>
             <label>${esc(member.name)} → ${esc(actor.name)} 호칭
               <input class="chatlog-member-call" maxlength="80" placeholder="예: 이름, 선배, 자기" value="${esc(relation.memberCallsPersona || '')}">
             </label>
@@ -1707,6 +1694,11 @@ async function editRoomRelationships(room, options = {}) {
               <textarea class="chatlog-relation-note" rows="2" maxlength="300" placeholder="다른 멤버들도 알고 있어야 할 사실만">${esc(relation.note || '')}</textarea>
             </label>
           </section>`);
+        $row.find('.chatlog-relation-type').on('change', function () {
+            const custom = this.value === 'custom';
+            $row.find('.chatlog-custom-relation').toggle(custom);
+            if (custom) $row.find('.chatlog-relation-label').trigger('focus');
+        });
         $list.append($row);
     }
 
@@ -1728,19 +1720,30 @@ async function editRoomRelationships(room, options = {}) {
         const $button = $(this);
         if ($button.hasClass('busy')) return;
         $button.addClass('busy').text('저장 중...');
+        let invalidCustom = null;
         const memberRelations = $sheet.find('.chatlog-relation-row').map((_, element) => {
             const $row = $(element);
             const member = room.members.find(item => item.avatar === $row.data('avatar'));
+            const type = $row.find('.chatlog-relation-type').val();
+            const customLabel = $row.find('.chatlog-relation-label').val().trim();
+            if (type === 'custom' && !customLabel && !invalidCustom) invalidCustom = $row;
             return {
                 memberAvatar: $row.data('avatar'),
                 memberName: member?.name || $row.data('avatar'),
-                type: $row.find('.chatlog-relation-type').val(),
+                type,
+                label: type === 'custom' ? customLabel : '',
                 memberCallsPersona: $row.find('.chatlog-member-call').val().trim(),
                 personaCallsMember: $row.find('.chatlog-persona-call').val().trim(),
                 forbiddenTerms: $row.find('.chatlog-forbidden').val().trim(),
                 note: $row.find('.chatlog-relation-note').val().trim(),
             };
         }).get();
+        if (invalidCustom) {
+            toastr?.warning?.('직접 입력한 관계 이름을 적어 주세요.');
+            invalidCustom.find('.chatlog-relation-label').trigger('focus');
+            $button.removeClass('busy').text('관계 저장');
+            return;
+        }
         try {
             const result = await api('/room/relationships/manual', {
                 roomId: room.id,
@@ -2368,7 +2371,6 @@ window.cl = {
 
 // ── 진입 ──────────────────────────────────────────────────
 jQuery(async () => {
-    installToastPortal();
     $('#extensions_settings2').append(SETTINGS_HTML);
     const $settingsDrawer = $('.chatlog-settings .inline-drawer-content');
     $settingsDrawer.hide();

@@ -1,11 +1,11 @@
 /* ==========================================================
    chatlog — 셋로그 스타일 (화이트 / 16:10 / 타임라인)
-   오버레이는 <html>에 append → MovingUI transform 무시, 뷰포트 정중앙
+   오버레이는 <body> 직계에 append → 공식 토스트와 같은 루트에서 레이어 정렬
    흐림·그림자 전면 제거
    ========================================================== */
 
-html > .chatlog-overlay,
-html > .chatlog-sheet {
+body > .chatlog-overlay,
+body > .chatlog-sheet {
     position: fixed !important;
     top: 0 !important; left: 0 !important; right: 0 !important; bottom: 0 !important;
     width: 100vw !important;
@@ -24,26 +24,16 @@ html > .chatlog-sheet {
     box-shadow: none !important;
 }
 
-html > .chatlog-overlay { z-index: 100000 !important; }
-html > .chatlog-sheet { z-index: 100010 !important; }
+body > .chatlog-overlay { z-index: 100000 !important; }
+body > .chatlog-sheet { z-index: 100010 !important; }
 
-/* 챗로그·시트보다 토스트를 위에 표시 */
-html #toast-container,
-body #toast-container,
-#toast-container.toast-top-center,
-#toast-container.toast-top-right,
-#toast-container.toast-bottom-right {
-    position: fixed !important;
+/* SillyTavern 공식 토스트의 DOM·크기·색·투명도를 건드리지 않고 레이어만 올린다. */
+#toast-container {
     z-index: 2147483647 !important;
 }
-html > #toast-container.chatlog-toast-portal {
-    z-index: 2147483647 !important;
-    isolation: isolate !important;
-    transform: translateZ(0) !important;
-}
 
-html > .chatlog-overlay *,
-html > .chatlog-sheet * {
+body > .chatlog-overlay *,
+body > .chatlog-sheet * {
     text-shadow: none !important;
     box-shadow: none !important;
     filter: none !important;
@@ -670,10 +660,61 @@ html > .chatlog-sheet * {
     font: inherit;
     resize: vertical;
 }
-.chatlog-relation-tools {
-    display: flex;
-    justify-content: center;
-    margin-top: 10px;
+.chatlog-relation-footer {
+    position: sticky;
+    bottom: -20px;
+    z-index: 3;
+    display: grid;
+    grid-template-columns: minmax(0, 1.35fr) auto auto;
+    align-items: center;
+    gap: 8px;
+    margin: 12px -2px -12px;
+    padding: 10px 2px 12px;
+    background: #ffffff;
+}
+.chatlog-relation-footer .menu_button {
+    width: auto !important;
+    min-width: 0 !important;
+    min-height: 36px !important;
+    height: 36px !important;
+    margin: 0 !important;
+    padding: 0 12px !important;
+    border: 1px solid #e3ded8 !important;
+    border-radius: 11px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    writing-mode: horizontal-tb !important;
+    white-space: nowrap !important;
+    line-height: 1 !important;
+    font-size: 0.76em !important;
+    font-weight: 700 !important;
+    background: #f6f4f1 !important;
+    color: #4d4842 !important;
+}
+.chatlog-relation-footer .chatlog-relation-ai {
+    background: #f1eef7 !important;
+    color: #5d4d7c !important;
+    border-color: #e0d9ec !important;
+}
+.chatlog-relation-footer .chatlog-relation-save {
+    background: #24211f !important;
+    color: #ffffff !important;
+    border-color: #24211f !important;
+}
+.chatlog-relation-footer .menu_button.busy {
+    opacity: 0.55;
+    pointer-events: none;
+}
+@media (max-width: 370px) {
+    .chatlog-relation-footer {
+        grid-template-columns: minmax(0, 1fr) auto auto;
+        gap: 6px;
+    }
+    .chatlog-relation-footer .menu_button {
+        padding: 0 8px !important;
+        font-size: 0.7em !important;
+    }
 }
 .chatlog-personapick { text-align: left; padding: 4px 0; }
 .chatlog-picktitle { text-align: center; font-size: 1.05em; font-weight: 800; margin-bottom: 4px; }
