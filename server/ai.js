@@ -1853,10 +1853,18 @@ function normalizeReferences(references) {
 }
 
 async function requestGeneratedImage(api, prompt, references = []) {
-    const parts = [{ text: prompt }];
+    const parts = [];
     for (const [index, reference] of normalizeReferences(references).entries()) {
+        const neutralLabel = index === 0
+            ? 'Person A — the posting character'
+            : `Person ${String.fromCharCode(65 + index)} — a separate companion`;
         parts.push({
-            text: `Reference image ${index + 1}: ${reference.role || 'person'}${reference.name ? ` "${reference.name}"` : ''}. Keep this person distinct from every other reference.`,
+            text: [
+                `Reference image ${index + 1}: ${neutralLabel}.`,
+                'This reference image is the sole visual identity source for this person.',
+                'Copy the same face and visible identity from the reference pixels; do not infer appearance from a name, fictional canon, film, actor, celebrity, franchise, adaptation, or general training-data association.',
+                'Keep this person distinct from every other reference.',
+            ].join(' '),
         });
         parts.push({
             inline_data: {
@@ -1865,12 +1873,43 @@ async function requestGeneratedImage(api, prompt, references = []) {
             },
         });
     }
+    // 참조 이미지와 정체성 지시를 장면 프롬프트보다 먼저 전달해, 유명 이름이나
+    // 배경 설정보다 프사의 얼굴을 우선하도록 한다.
+    parts.push({ text: prompt });
     return callVertexProfile(api, {
         contents: [{ role: 'user', parts }],
         generationConfig: {
             responseModalities: ['Image'],
         },
     });
+}
+
+function replaceLiteralIgnoreCase(text, search, replacement) {
+    const needle = String(search || '').trim();
+    if (!needle) return text;
+    const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return String(text || '').replace(new RegExp(escaped, 'giu'), replacement);
+}
+
+function identityNameVariants(name) {
+    const full = String(name || '').trim();
+    if (!full) return [];
+    const first = full.split(/\s+/u)[0] || '';
+    return [...new Set([
+        full,
+        first.length >= 3 ? first : '',
+    ].filter(Boolean))].sort((a, b) => b.length - a.length);
+}
+
+function neutralizeIdentityNames(scene, member, persona) {
+    let neutral = String(scene || '');
+    for (const name of identityNameVariants(member?.name)) {
+        neutral = replaceLiteralIgnoreCase(neutral, name, 'Person A');
+    }
+    for (const name of identityNameVariants(persona?.name)) {
+        neutral = replaceLiteralIgnoreCase(neutral, name, 'Person B');
+    }
+    return neutral;
 }
 
 async function generateImage(
@@ -1887,26 +1926,31 @@ async function generateImage(
     const imageApi = resolveImageApi(settings);
 
     const usableReferences = normalizeReferences(references);
-    const posterName = member?.name || 'the posting character';
     const everydayPhoto = photoMode === 'everyday';
+    const hasCompanionReference = usableReferences
+        .some(reference => reference.role === 'user persona');
     if (!everydayPhoto
         && !usableReferences.some(reference => reference.role === 'posting character')) {
         throw new Error('게시 캐릭터 참조 프사가 없어 인물 사진 생성을 건너뜀');
     }
-    const visible = String(visualIdentity || '').trim().slice(0, 500);
-    const personaVisible = String(personaVisualIdentity || '').trim().slice(0, 500);
+    // 인물 이름이 유명 캐릭터·배우의 학습 외형을 불러오지 않도록 실제 이미지
+    // 요청에서는 이름을 중립 라벨로 바꾼다. 얼굴·머리·나이·체격은 첨부 프사만
+    // 기준으로 하며, 텍스트 모델이 만든 visualIdentity는 장면 판단에만 사용한다.
+    const neutralScene = neutralizeIdentityNames(scene, member, persona);
     const identityRule = everydayPhoto
-        ? `The photographer is ${posterName}, but ${posterName} and every other person must remain completely out of frame. Do not generate a face, body, reflection, selfie, portrait, crowd, or identifiable bystander.`
+        ? 'The photographer and every other person must remain completely out of frame. Do not generate a face, body, reflection, selfie, portrait, crowd, or identifiable bystander.'
         : [
-            `The person posting this photo is ${posterName}.`,
-            visible ? `Visible identity of ${posterName}: ${visible}.` : '',
-            'The first reference image labeled "posting character" is the mandatory identity anchor.',
-            'Preserve the exact same person: gender presentation, approximate age, facial structure, eyes, nose, mouth, hair, skin tone and build. Do not substitute a lookalike or a different person.',
-            persona?.name
-                ? `${persona.name} is a separate person from the posting character; never merge their bodies, conditions or actions.`
+            'STRICT REFERENCE-ONLY IDENTITY LOCK.',
+            'Person A is the posting character and must be the exact person shown in Reference image 1.',
+            'Reference image 1 is the sole and mandatory source for Person A’s face, facial proportions, eyes, nose, mouth, jaw, hair, apparent age, skin tone and build.',
+            'Ignore every visual association learned from character names, fictional canon, books, films, television, actors, celebrities, franchises, adaptations or fandom artwork.',
+            'Do not render a canonical version, screen adaptation, actor, celebrity, lookalike or alternate interpretation of Person A.',
+            'Names in the scene are role labels only and have been intentionally replaced with neutral labels. Never use a name to decide appearance.',
+            hasCompanionReference
+                ? 'Person B must be the exact separate person shown in Reference image 2. Reference image 2 is the sole visual identity source for Person B.'
                 : '',
-            personaVisible && persona?.name
-                ? `Visible identity of user persona ${persona.name}: ${personaVisible}. Preserve their face, hair, age, build and clothing separately.`
+            hasCompanionReference
+                ? 'Never merge Person A and Person B, exchange their faces, or transfer one person’s appearance to the other.'
                 : '',
         ].filter(Boolean).join(' ');
     const cameraRule = everydayPhoto
@@ -1916,14 +1960,28 @@ async function generateImage(
         ? `Calendar context: ${temporalContext}. Match clothing, daylight, vegetation and surroundings to this date, season and time. Do not invent rain, snow or extreme weather from the season alone. If the described location has a different climate or the scene is indoors, follow the actual location and environment instead.`
         : '';
     const qualityRule = 'Create the image now as a casual phone snapshot taken moments ago for an immediate social post. Natural available light, slightly imperfect framing, no text, no watermark.';
-    const fullPrompt = `${scene}. ${identityRule} ${seasonRule} ${cameraRule} ${qualityRule}`;
+    const fullPrompt = `${neutralScene}. ${identityRule} ${seasonRule} ${cameraRule} ${qualityRule}`;
     const compactPrompt = everydayPhoto
-        ? `${scene}. ${identityRule} ${seasonRule} Generate a casual rear-camera phone snapshot of daily life with absolutely no people. No text or watermark.`
-        : `${scene}. ${identityRule} ${seasonRule} Generate a casual phone selfie taken by ${posterName}. No text or watermark.`;
+        ? `${neutralScene}. ${identityRule} ${seasonRule} Generate a casual rear-camera phone snapshot of daily life with absolutely no people. No text or watermark.`
+        : `${neutralScene}. ${identityRule} ${seasonRule} Generate a casual phone selfie taken by Person A. No text or watermark.`;
+    const recoveryPrompt = everydayPhoto
+        ? `${neutralScene}. Generate a fresh casual rear-camera phone snapshot. No person, face, body, human reflection, text or watermark. ${seasonRule}`
+        : [
+            `${neutralScene}. Generate a fresh casual smartphone selfie from scratch.`,
+            'IDENTITY IS MORE IMPORTANT THAN STYLE OR CANON.',
+            'Person A must match Reference image 1 exactly and must not resemble any actor, celebrity, official adaptation or famous fictional-character depiction.',
+            hasCompanionReference
+                ? 'Person B must separately match Reference image 2 exactly; keep both faces distinct.'
+                : 'Only Person A may be visible.',
+            cameraRule,
+            seasonRule,
+            'No text or watermark.',
+        ].filter(Boolean).join(' ');
     const attemptLabel = everydayPhoto ? '일상사진' : '인물 참조';
     const attempts = [
         { label: `${attemptLabel}+전체 프롬프트`, prompt: fullPrompt, references: usableReferences },
         { label: `${attemptLabel}+간단 프롬프트`, prompt: compactPrompt, references: usableReferences },
+        { label: `${attemptLabel}+추가 재생성`, prompt: recoveryPrompt, references: usableReferences },
     ];
 
     let inline = null;
