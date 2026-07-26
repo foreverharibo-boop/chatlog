@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.8.2';
+const CHATLOG_VERSION = '0.8.3';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -839,6 +839,39 @@ async function openChatlog() {
 function closeChatlog() { $overlay?.remove(); $overlay = null; }
 
 let refreshInFlight = null;
+function preloadImage(src, timeoutMs = 2500) {
+    if (!src) return Promise.resolve();
+    return new Promise(resolve => {
+        const image = new Image();
+        let settled = false;
+        const finish = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            image.onload = null;
+            image.onerror = null;
+            resolve();
+        };
+        const timer = setTimeout(finish, timeoutMs);
+        image.onload = finish;
+        image.onerror = finish;
+        image.decoding = 'async';
+        image.src = src;
+        if (image.complete) finish();
+    });
+}
+
+async function preloadVisibleFeedImages() {
+    if (view.screen !== 'feed') return;
+    const room = state.rooms[view.roomId];
+    if (!room) return;
+    const { pages, pageIndex } = feedState(room);
+    const sources = pages[pageIndex]?.items
+        ?.filter(item => item.kind === 'post' && item.post?.image)
+        .map(item => item.post.image) || [];
+    await Promise.all([...new Set(sources)].map(src => preloadImage(src)));
+}
+
 async function refresh() {
     if (refreshInFlight) return refreshInFlight;
     refreshInFlight = (async () => {
@@ -853,23 +886,19 @@ async function refresh() {
                 `<small>plugins/chatlog 설치와 ST 재시작을 확인해주세요<br>${esc(e.message)}</small></div>`);
             return;
         }
+        await preloadVisibleFeedImages();
         updateQuickOpenBadge();
-        render();
-        requestAnimationFrame(() => {
-            if ($overlay && view.screen === 'feed') {
-                $overlay.find('.chatlog-body').scrollTop(scrollTop);
-            }
-        });
+        render({ preserveScroll: true, scrollTop });
     })().finally(() => {
         refreshInFlight = null;
     });
     return refreshInFlight;
 }
 
-function render() {
+function render(options = {}) {
     if (!$overlay) return;
     $overlay.find('.chatlog-back').toggleClass('hidden', view.screen === 'rooms');
-    view.screen === 'rooms' ? renderRooms() : renderFeed();
+    view.screen === 'rooms' ? renderRooms() : renderFeed(options);
 }
 
 // ── 로그 목록 ─────────────────────────────────────────────
@@ -994,13 +1023,50 @@ function feedState(room) {
     return { posts, days, dayPosts, slots, pages, pageIndex, f };
 }
 
-function renderFeed() {
+function reuseStableImages($oldCard, $newCard) {
+    const oldImages = new Map();
+    $oldCard.find('img').each((_, element) => {
+        const $image = $(element);
+        const key = `${element.className}\u0000${$image.attr('src') || ''}`;
+        if (!oldImages.has(key)) oldImages.set(key, []);
+        oldImages.get(key).push($image);
+    });
+    $newCard.find('img').each((_, element) => {
+        const $newImage = $(element);
+        const key = `${element.className}\u0000${$newImage.attr('src') || ''}`;
+        const bucket = oldImages.get(key);
+        const $oldImage = bucket?.shift();
+        if ($oldImage?.length) $newImage.replaceWith($oldImage.detach());
+    });
+}
+
+function renderFeed(options = {}) {
     const room = state.rooms[view.roomId];
     if (!room) { view.screen = 'rooms'; return render(); }
 
     $overlay.find('.chatlog-title').text(room.name);
     const $body = $overlay.find('.chatlog-body');
     const $b = $('<div class="chatlog-render-buffer"></div>');
+    const preserveScroll = options.preserveScroll === true;
+    const retainedScrollTop = preserveScroll
+        ? Number(options.scrollTop ?? $body.scrollTop() ?? 0)
+        : 0;
+    const commitBody = () => {
+        const body = $body[0];
+        if (!body) return;
+        const fragment = document.createDocumentFragment();
+        for (const child of $b.children().toArray()) fragment.appendChild(child);
+        body.replaceChildren(fragment);
+        if (!preserveScroll) return;
+        const restore = () => {
+            if (!body.isConnected) return;
+            const maxScroll = Math.max(0, body.scrollHeight - body.clientHeight);
+            body.scrollTop = Math.min(retainedScrollTop, maxScroll);
+        };
+        // 같은 페인트 안에서 먼저 복원하고, 이미지·글꼴 레이아웃 뒤 한 번 더 고정한다.
+        restore();
+        requestAnimationFrame(restore);
+    };
 
     const { days, dayPosts, slots, pages, pageIndex, f } = feedState(room);
 
@@ -1044,7 +1110,7 @@ function renderFeed() {
 
     if (!slots.length) {
         $b.append('<div class="chatlog-empty">이 날은 기록이 없어요.<br><small>카메라 버튼으로 지금 한 장 올려보세요.</small></div>');
-        $body.empty().append($b.children());
+        commitBody();
         return;
     }
 
@@ -1066,7 +1132,7 @@ function renderFeed() {
 
     const currentPage = pages[pageIndex];
     if (!currentPage) {
-        $body.empty().append($b.children());
+        commitBody();
         return;
     }
 
@@ -1120,14 +1186,9 @@ function renderFeed() {
             $newCard.replaceWith($oldCard.detach());
             return;
         }
-        const $oldBackground = $oldCard.find('.chatlog-sc-bg').first();
-        const $newBackground = $newCard.find('.chatlog-sc-bg').first();
-        if ($oldBackground.length && $newBackground.length
-            && $oldBackground.attr('src') === $newBackground.attr('src')) {
-            $newBackground.replaceWith($oldBackground.detach());
-        }
+        reuseStableImages($oldCard, $newCard);
     });
-    $body.empty().append($b.children());
+    commitBody();
 }
 
 function hourLabelShort(h) {
@@ -1883,6 +1944,7 @@ const COMMENT_RULES = [
     '- SNS 댓글 말투. 완결된 문장이 아니어도 된다.',
     '- 사진이 있으면 구체적인 것 하나를 집어서 반응하라.',
     '- 나레이션, 행동 묘사(*...*), 따옴표, 이름표 금지. 댓글 텍스트만 출력한다.',
+    '- "유저", "user", "페르소나", "persona"는 내부 역할표시다. 상대를 이 단어로 부르지 말고 실제 이름이나 관계에 맞는 호칭을 사용한다.',
 ].join('\n');
 
 function buildCommentMessages(job) {

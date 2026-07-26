@@ -10,12 +10,34 @@ ST → 확장 → Install extension → 이 저장소 URL 붙여넣기
 SillyTavern/public/scripts/extensions/third-party/chatlog/
 ```
 
-### 2. 서버 플러그인 (수동 필수)
-서버 플러그인은 확장 설치 기능으로 안 들어갑니다. 직접 복사하세요:
+### 2. 서버 플러그인 연결
+
+설치 전에 SillyTavern 서버를 완전히 종료하세요. 스크립트는 기존 `data.json`·`settings.json`을 확장 안의 서버 폴더로 옮기고, 기존 플러그인 폴더와 `config.yaml`을 백업한 뒤 바로가기를 만듭니다.
+
+Termux:
+
+```bash
+cd ~/SillyTavern/data/default-user/extensions/chatlog
+bash install-termux.sh ~/SillyTavern
 ```
-server/  →  SillyTavern/plugins/chatlog/
+
+Windows PowerShell:
+
+```powershell
+cd "C:\SillyTavern\data\default-user\extensions\chatlog"
+Unblock-File .\install-windows.ps1
+.\install-windows.ps1 -SillyTavernPath "C:\SillyTavern"
 ```
-`config.yaml` 에서 `enableServerPlugins: true` 확인 후 ST 재시작.
+
+설치 중 서버 플러그인 권한 안내에 동의하면 `enableServerPlugins: true`가 자동 적용됩니다. 완료 후 SillyTavern을 다시 실행하세요.
+
+기존 수동 설치에서 전환하는 경우에도 같은 명령을 사용합니다.
+
+- 기존 `plugins/chatlog` 폴더는 `plugins/chatlog-backup-날짜-번호`로 남습니다.
+- 기존 `data.json`과 `settings.json`은 새 확장 안의 `server` 폴더로 복사됩니다.
+- 기존 `config.yaml`은 `config.yaml.chatlog-backup-날짜-번호`로 남습니다.
+- 설치 후 `plugins/chatlog`는 확장 안의 `server` 폴더를 가리키는 바로가기가 됩니다.
+- 이후 GitHub 확장 업데이트로 클라이언트와 서버 코드가 함께 갱신되며, 서버 코드 변경을 적용하려면 SillyTavern을 재시작해야 합니다.
 
 ### 서버 플러그인 보안 안내
 
@@ -60,7 +82,7 @@ server/  →  SillyTavern/plugins/chatlog/
 - 캐릭터 댓글과 이모지 반응은 한 번의 JSON 생성으로 함께 처리해 호출 수 절감
 - 멤버별 댓글 관점을 분산하고 기존 댓글을 함께 제공해 시간대 상투어와 유사 댓글을 줄임
 - 한 시간대의 캐릭터 게시 판단은 최대 약 55분 안에서 순차 분산
-- 캐릭터 선택 검색, 카드와 같은 비율의 하루로그 GIF, 최상단 토스트, 이미지 DOM 재사용 렌더링 적용
+- 캐릭터 선택 검색, 카드와 같은 비율의 하루로그 GIF, 최상단 토스트, 이미지 사전 로드·DOM 재사용 렌더링 적용
 - 캐릭터끼리도 설정한 확률로 댓글을 달며, 이모지 후보는 화면과 서버 모두 10종으로 통일
 
 > 이미지 생성의 `responseModalities: ['Image']`는 Gemini의 이미지 전용 응답 요청 형식이므로 유지합니다.
@@ -309,3 +331,13 @@ public/user/images/chatlog/     # 생성된 이미지
 - AI에 전달할 이미지가 `public` 내부의 실제 이미지인지 확인하고 외부 심볼릭 링크 차단
 - `userHandle`을 저장할 때와 서버 시작 시 모두 검증해 다른 사용자 데이터 폴더 접근 차단
 - 외부 공개 시 로그인 보호와 민감한 데이터 파일 제외 안내 추가
+
+## v0.8.3 변경 사항
+
+- Termux용 `install-termux.sh`와 Windows용 `install-windows.ps1` 추가
+- 기존 수동 설치의 `data.json`·`settings.json`을 보존하고 플러그인 폴더·`config.yaml`을 자동 백업
+- 확장 안의 `server` 폴더를 플러그인 위치에 바로 연결해 이후 확장 업데이트가 서버 코드에도 반영되도록 변경
+- 댓글에서 내부 역할명인 `유저/user/페르소나/persona`가 실제 호칭으로 출력되면 한 번 재생성하고, 재발하면 저장하지 않도록 차단
+- 사진 유형 선택값 `mode`가 생성 단계의 `photoMode`로 전달되지 않던 오류 수정
+- 같은 캐릭터가 일상 사진 또는 셀카를 2회 연속 올리면 다음 게시물은 반대 유형으로 강제
+- 상태 갱신 시 새 사진을 미리 불러오고 스크롤을 같은 페인트 안에서 복원하며 기존 카드 이미지를 재사용해 화면 깜빡임 추가 완화

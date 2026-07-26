@@ -1064,16 +1064,18 @@ function choosePhotoMode(member, roll = 50, recentModes = []) {
     const bias = characterPhotoBias(member);
     const selfieChance = Math.max(35, Math.min(65, 50 + bias));
     const history = (recentModes || []).filter(mode => mode === 'selfie' || mode === 'everyday');
-    const lastThree = history.slice(0, 3);
-    const repeated = lastThree.length === 3 && lastThree.every(mode => mode === lastThree[0]);
+    const lastTwo = history.slice(0, 2);
+    const repeated = lastTwo.length === 2 && lastTwo.every(mode => mode === lastTwo[0]);
     const mode = repeated
-        ? lastThree[0] === 'selfie' ? 'everyday' : 'selfie'
+        ? lastTwo[0] === 'selfie' ? 'everyday' : 'selfie'
         : Number(roll) < selfieChance ? 'selfie' : 'everyday';
     return {
         mode,
+        photoMode: mode,
         bias,
         selfieChance,
         forcedOpposite: repeated,
+        forcedFrom: repeated ? lastTwo[0] : null,
     };
 }
 
@@ -1211,6 +1213,7 @@ async function generateComment(settings, room, post, member, options = {}) {
         '- 사진이 있으면 사진 속 구체적인 것 하나를 집어서 반응하라. 뭉뚱그리지 마라.',
         '- 나레이션, 행동 묘사(*...*), 따옴표 금지. 댓글 텍스트만 출력한다.',
         '- 이름표나 접두사를 붙이지 마라.',
+        `- "유저", "user", "페르소나", "persona"는 내부 역할표시일 뿐 실제 호칭이 아니다. 댓글에서 상대를 이 단어로 부르지 말고, 관계도에 허용된 호칭이나 실제 이름 "${authorName}"만 사용한다.`,
         recent ? '- 최근 대화의 분위기와 호칭은 연결된 유저 페르소나에게만 유지하라.' : '',
         `- 현재 댓글 작성 시각은 ${timeLabel(Date.now())}, ${nowTemporal.daypartKo}이다. 시간 표현이 꼭 필요할 때만 현재 시각과 맞춘다.`,
         isOtherCharacterPost
@@ -1243,14 +1246,16 @@ async function generateComment(settings, room, post, member, options = {}) {
         image: readImageAsBase64(post.image),
     });
 
-    return raw
-        .trim()
-        .replace(/^["'「『]|["'」』]$/g, '')
-        .replace(/^\*+|\*+$/g, '')
-        .replace(/^[^:\n]{1,20}:\s*/, '')   // "이름: " 접두사 제거
-        .split('\n')[0]
-        .slice(0, 120)
-        .trim();
+    let comment = cleanGeneratedComment(raw);
+    if (exposesInternalRoleLabel(comment)) {
+        const retryRaw = await callText(api, {
+            system,
+            user: `${user}\n\n첫 답변은 내부 역할명("유저/user/페르소나/persona")을 실제 호칭처럼 써서 폐기됐다. 그 단어들을 쓰지 말고 실제 이름이나 허용된 호칭으로 완전히 다시 작성하라.`,
+            image: readImageAsBase64(post.image),
+        });
+        comment = cleanGeneratedComment(retryRaw);
+    }
+    return exposesInternalRoleLabel(comment) ? '' : comment;
 }
 
 // ── 캐릭터 이모지 반응 생성 ────────────────────────────────
@@ -1265,6 +1270,10 @@ function cleanGeneratedComment(raw) {
         .split('\n')[0]
         .slice(0, 120)
         .trim();
+}
+
+function exposesInternalRoleLabel(value) {
+    return /(?:유저|페르소나|\buser\b|\bpersona\b)/iu.test(String(value || ''));
 }
 
 function commentBigrams(value) {
@@ -1388,6 +1397,7 @@ async function generateEngagement(settings, room, post, member, options = {}) {
             : '',
         '사진이 있으면 사진 속 구체적인 것 하나를 짚을 수 있다.',
         '사진에 함께 나온 사람을 근거 없이 여친·남친·연인·파트너라고 추측하지 않는다.',
+        `댓글에서 "유저", "user", "페르소나", "persona"를 상대 호칭으로 절대 출력하지 않는다. 이는 내부 역할표시다. 필요하면 실제 이름 "${authorName}" 또는 관계도에 허용된 호칭만 사용한다.`,
         `현재 댓글 작성 시각은 ${timeLabel(Date.now())}, ${nowTemporal.daypartKo}이다. 시간 표현이 꼭 필요할 때만 현재 시각과 맞춘다.`,
         '나레이션, 행동 묘사, 따옴표, 이름표를 붙이지 마라.',
     ].filter(Boolean).join('\n');
@@ -1423,17 +1433,24 @@ async function generateEngagement(settings, room, post, member, options = {}) {
     }
     const emoji = REACTION_EMOJIS.find(item => String(parsed.emoji).includes(item)) || '👍';
     let comment = commentWanted ? cleanGeneratedComment(parsed.comment) : '';
-    if (commentWanted && comment && repeatsExistingComment(comment, post.comments || [])) {
+    if (commentWanted && comment
+        && (repeatsExistingComment(comment, post.comments || []) || exposesInternalRoleLabel(comment))) {
         try {
+            const retryReason = exposesInternalRoleLabel(comment)
+                ? '첫 후보 댓글은 내부 역할명("유저/user/페르소나/persona")을 실제 호칭처럼 써서 폐기됐다. 그 단어를 전부 빼고 실제 이름이나 허용된 호칭을 사용한다.'
+                : '첫 후보 댓글은 기존 댓글과 너무 비슷해 폐기됐다. 문장 시작·관점·질문 방식을 완전히 바꾼다.';
             const retryRaw = await callText(api, {
                 ...request,
-                user: `${user}\n\n첫 후보 댓글은 기존 댓글과 너무 비슷해 폐기됐다. 문장 시작·관점·질문 방식을 완전히 바꾼 JSON을 한 번만 다시 출력하라.`,
+                user: `${user}\n\n${retryReason} 수정한 JSON을 한 번만 다시 출력하라.`,
             });
             const retryParsed = extractJson(retryRaw);
             if (String(retryParsed?.speakerId || '') === String(member.avatar)
                 && String(retryParsed?.targetId || '') === String(expectedTarget)) {
                 const retryComment = cleanGeneratedComment(retryParsed.comment);
-                comment = repeatsExistingComment(retryComment, post.comments || []) ? '' : retryComment;
+                comment = repeatsExistingComment(retryComment, post.comments || [])
+                    || exposesInternalRoleLabel(retryComment)
+                    ? ''
+                    : retryComment;
             } else {
                 comment = '';
             }
@@ -1531,6 +1548,7 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
         `- scene은 사진을 올리는 사람이 "${member.name}"임을 전제로 쓴다. 인물이 나오면 이름 또는 "the male character", "his partner"처럼 역할을 명확히 적는다.`,
         '- 장면의 모든 행동·직업·신체 상태가 누구의 것인지 roleCheck로 마지막 검증한다. 서로 뒤바뀌었으면 고쳐서 출력한다.',
         '- caption도 캐릭터가 직접 쓴 말이어야 하며, 유저가 쓴 것처럼 시점을 바꾸지 마라.',
+        '- caption에는 내부 역할표시인 "유저", "user", "페르소나", "persona"를 호칭처럼 쓰지 않는다. 실제 이름이나 관계에 맞는 호칭만 쓴다.',
         '- 폰으로 방금 대충 찍어 바로 올린 스냅이어야 한다. 구도가 조금 어긋나도 좋다.',
         '- 조명·장소·사물을 구체적으로. 추상적 표현 금지.',
         `- 현재 달력과 시간대는 ${temporal.label}, ${timeLabel(slotAt)}이다. 장면과 caption의 아침·낮·저녁·밤 표현을 반드시 이 시각에 맞춘다.`,
@@ -1544,7 +1562,7 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
         `현재 날짜와 시각은 ${temporal.label}, ${timeLabel(slotAt)}이다.`,
         `이번 랜덤 게시 충동은 ${decision.randomRoll ?? 50}/99이다.`,
         `이번 사진 유형은 ${everydayPhoto ? '사람 없는 일상 사진' : '셀카'}로 이미 결정됐다. 다른 유형으로 바꾸지 마라.`,
-        `기본 셀카 확률은 50%이며 캐릭터 카드 보정 후 ${decision.selfieChance ?? 50}%다.${decision.forcedOpposite ? ' 같은 유형이 3번 연속되어 이번에는 반대 유형으로 강제됐다.' : ''}`,
+        `기본 셀카 확률은 50%이며 캐릭터 카드 보정 후 ${decision.selfieChance ?? 50}%다.${decision.forcedOpposite ? ' 같은 유형이 2번 연속되어 이번에는 반대 유형으로 강제됐다. 반드시 강제된 유형을 지킨다.' : ''}`,
         `활동 시간 기준 마지막 게시 후 약 ${Number(decision.activeHoursSinceLastPost || 0).toFixed(1)}시간 지났다.`,
         forcePost
             ? '이번에는 반드시 올린다. 무엇을 찍어 올릴지 JSON으로 답하라.'

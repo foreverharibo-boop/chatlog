@@ -72,6 +72,10 @@ function cleanDisplayName(value) {
     return name || '캐릭터';
 }
 
+function exposesInternalRoleLabel(value) {
+    return /(?:유저|페르소나|\buser\b|\bpersona\b)/iu.test(String(value || ''));
+}
+
 function secureSettingsUserHandle() {
     const storedUserHandle = String(settings.userHandle || 'default-user').trim();
     const safeHandle = ai.safeUserHandle(storedUserHandle);
@@ -349,6 +353,9 @@ async function runJob(job) {
             replyToCommentId: job.replyToCommentId,
             commentIntent: job.commentIntent,
         });
+        if (!text || exposesInternalRoleLabel(text)) {
+            return { status: 'comment-skipped', commented: false };
+        }
         post.comments.push({
             id: uid('c'),
             author: member.avatar,
@@ -994,9 +1001,13 @@ async function init(router) {
         const { roomId, postId, charId, charName, text } = req.body || {};
         const post = findPost(roomId, postId);
         if (!post) return res.status(404).json({ error: 'post not found' });
+        const safeText = String(text || '').trim().slice(0, 120);
+        if (!safeText || exposesInternalRoleLabel(safeText)) {
+            return res.status(400).json({ error: 'invalid generated comment' });
+        }
         post.comments.push({
             id: uid('c'), author: charId, authorName: charName,
-            text, createdAt: Date.now(), read: false,
+            text: safeText, createdAt: Date.now(), read: false,
         });
         saveDb();
         res.json({ ok: true });
