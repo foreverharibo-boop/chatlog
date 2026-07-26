@@ -17,6 +17,14 @@ server/  →  SillyTavern/plugins/chatlog/
 ```
 `config.yaml` 에서 `enableServerPlugins: true` 확인 후 ST 재시작.
 
+### 서버 플러그인 보안 안내
+
+- 자동 게시·예약 댓글·이미지 생성은 서버 플러그인이 담당하므로 `enableServerPlugins: true`가 필요합니다.
+- 서버 플러그인은 일반 브라우저 확장보다 권한이 큽니다. 출처를 신뢰하는 플러그인만 `plugins` 폴더에 설치하세요.
+- Cloudflare Tunnel 등으로 SillyTavern을 외부에 공개한다면 반드시 SillyTavern 로그인 보호를 켜고 공개 주소를 공유하지 마세요.
+- API 키, `server/data.json`, `server/settings.json`은 GitHub나 배포 ZIP에 포함하지 마세요.
+- 챗로그는 관리 이미지의 읽기·등록·삭제 경로를 지정된 SillyTavern 폴더 내부로 제한합니다.
+
 ### 3. 설정
 확장 탭 → chatlog
 - 실리태번에서 현재 선택한 연결 프로필 자동 사용 (기본값, 체크 해제 시 수동 선택)
@@ -293,3 +301,11 @@ public/user/images/chatlog/     # 생성된 이미지
 - 관계 종류에 **직접 입력**을 추가해 사용자 정의 관계명을 저장 가능
 - AI 제안·나중에·관계 저장 버튼을 모바일에서도 가로 한 줄로 표시
 - 관계 편집기 하단 버튼을 작고 깔끔한 고정형 버튼 바로 정리
+
+## v0.8.2 보안 변경 사항
+
+- 이미지 삭제 대상을 `public/user/images/chatlog` 내부로 제한해 경로 탈출 삭제 차단
+- 수동 게시 이미지가 실제 챗로그 이미지 폴더의 허용된 이미지 파일인지 검증
+- AI에 전달할 이미지가 `public` 내부의 실제 이미지인지 확인하고 외부 심볼릭 링크 차단
+- `userHandle`을 저장할 때와 서버 시작 시 모두 검증해 다른 사용자 데이터 폴더 접근 차단
+- 외부 공개 시 로그인 보호와 민감한 데이터 파일 제외 안내 추가

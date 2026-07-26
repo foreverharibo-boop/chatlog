@@ -72,6 +72,16 @@ function cleanDisplayName(value) {
     return name || '캐릭터';
 }
 
+function secureSettingsUserHandle() {
+    const storedUserHandle = String(settings.userHandle || 'default-user').trim();
+    const safeHandle = ai.safeUserHandle(storedUserHandle);
+    settings.userHandle = safeHandle;
+    if (safeHandle !== storedUserHandle) {
+        console.warn(`[chatlog] 안전하지 않은 userHandle을 기본값으로 복구: ${storedUserHandle}`);
+        saveSettings();
+    }
+}
+
 function loadAll() {
     db = loadJson(DATA_PATH, db);
     db.rooms ??= {}; db.posts ??= {}; db.jobs ??= [];
@@ -86,6 +96,7 @@ function loadAll() {
     db.runtime.skippedMissedSlots ??= 0;
     for (const job of db.jobs) job.attempts ??= 0;
     settings = { ...settings, ...loadJson(SETTINGS_PATH, {}) };
+    secureSettingsUserHandle();
     // v0.7.12: 텍스트는 ST 프로필, 이미지는 별도 Vertex Express 설정만 사용한다.
     settings.textMode = 'profile';
     settings.imageProvider = 'vertex';
@@ -489,10 +500,46 @@ async function executeJob(job, allowRetry = true) {
 }
 
 // ── 자동 정리 ─────────────────────────────────────────────
-function removeImageFile(webPath) {
-    if (!webPath || !webPath.includes('/chatlog/')) return;
+// chatlog가 관리하는 이미지 폴더 (이 밖의 파일은 절대 삭제하지 않음)
+const PUBLIC_DIR = path.resolve(ST_ROOT, 'public');
+const CHATLOG_IMAGE_DIR = path.resolve(ST_ROOT, 'public', 'user', 'images', 'chatlog');
+const CHATLOG_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.avif']);
+
+function isPathInside(root, candidate) {
+    const relative = path.relative(root, candidate);
+    return !!relative
+        && relative !== '..'
+        && !relative.startsWith(`..${path.sep}`)
+        && !path.isAbsolute(relative);
+}
+
+function resolveChatlogImage(webPath, requireExisting = false) {
+    if (!webPath || typeof webPath !== 'string' || webPath.includes('\0')) return null;
+    const abs = path.resolve(PUBLIC_DIR, webPath.replace(/^\/+/, ''));
+    if (!isPathInside(CHATLOG_IMAGE_DIR, abs)
+        || !CHATLOG_IMAGE_EXTENSIONS.has(path.extname(abs).toLowerCase())) {
+        return null;
+    }
+    if (!requireExisting) return abs;
     try {
-        fs.unlinkSync(path.join(ST_ROOT, 'public', webPath.replace(/^\/+/, '')));
+        const stat = fs.statSync(abs);
+        if (!stat.isFile()) return null;
+        const realImageRoot = fs.realpathSync(CHATLOG_IMAGE_DIR);
+        const realFile = fs.realpathSync(abs);
+        return isPathInside(realImageRoot, realFile) ? abs : null;
+    } catch {
+        return null;
+    }
+}
+
+function removeImageFile(webPath) {
+    const abs = resolveChatlogImage(webPath);
+    if (!abs) {
+        console.warn('[chatlog] 이미지 삭제 거부 (chatlog 폴더 밖):', webPath);
+        return;
+    }
+    try {
+        fs.unlinkSync(abs);
     } catch { /* 이미 없으면 무시 */ }
 }
 
@@ -663,9 +710,19 @@ async function init(router) {
 
     router.post('/settings', (req, res) => {
         const body = req.body || {};
+        if (body.userHandle !== undefined) {
+            const requestedHandle = String(body.userHandle || '').trim();
+            if (!requestedHandle || ai.safeUserHandle(requestedHandle) !== requestedHandle) {
+                return res.status(400).json({ error: 'invalid userHandle' });
+            }
+        }
         for (const k of Object.keys(settings)) {
             if (body[k] === undefined) continue;
             if (k === 'imageApiKey' && body[k] === '••••') continue; // 마스킹된 값은 무시
+            if (k === 'userHandle') {
+                settings[k] = String(body[k]).trim();
+                continue;
+            }
             settings[k] = body[k];
         }
         saveSettings();
@@ -839,11 +896,19 @@ async function init(router) {
         const room = db.rooms[roomId];
         if (!room) return res.status(404).json({ error: 'room not found' });
 
+        // 이미지 경로 검증 — chatlog 이미지 폴더 내부 경로만 허용 (../ 탈출 차단)
+        let safeImage = null;
+        if (image && typeof image === 'string') {
+            const abs = resolveChatlogImage(image, true);
+            if (abs) safeImage = image;
+            else return res.status(400).json({ error: 'invalid image path' });
+        }
+
         const post = {
             id: uid('post'), roomId, author: 'user',
             authorName: room.persona?.name || settings.userPersonaName || null,
             slotAt: Date.now(), createdAt: Date.now(),
-            text, image, imageSource: 'upload',
+            text, image: safeImage, imageSource: 'upload',
             read: true, comments: [], reactions: [],
         };
         (db.posts[roomId] ??= []).push(post);
@@ -870,6 +935,7 @@ async function init(router) {
         try {
             reloadAi();
             settings = { ...settings, ...loadJson(SETTINGS_PATH, {}) };
+            secureSettingsUserHandle();
             console.log('[chatlog] 리로드 완료');
             res.json({ ok: true, reloaded: ['ai.js', 'settings.json'] });
         } catch (e) {

@@ -8,6 +8,36 @@ const path = require('path');
 const crypto = require('crypto');
 
 const ST_ROOT = path.resolve(__dirname, '..', '..');
+const DATA_ROOT = path.resolve(ST_ROOT, 'data');
+const PUBLIC_ROOT = path.resolve(ST_ROOT, 'public');
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.avif']);
+
+function isPathInside(root, candidate) {
+    const relative = path.relative(root, candidate);
+    return !!relative
+        && relative !== '..'
+        && !relative.startsWith(`..${path.sep}`)
+        && !path.isAbsolute(relative);
+}
+
+function safeUserHandle(value) {
+    const handle = String(value || 'default-user').trim();
+    if (!handle
+        || handle === '.'
+        || handle === '..'
+        || handle.includes('\0')
+        || handle.includes('/')
+        || handle.includes('\\')
+        || handle.includes('..')) {
+        return 'default-user';
+    }
+    const candidate = path.resolve(DATA_ROOT, handle);
+    return isPathInside(DATA_ROOT, candidate) ? handle : 'default-user';
+}
+
+function userDataDir(settings) {
+    return path.resolve(DATA_ROOT, safeUserHandle(settings?.userHandle));
+}
 
 const loadJson = (p, fb) => {
     try { return JSON.parse(fs.readFileSync(p, 'utf-8')); } catch { return fb; }
@@ -61,7 +91,7 @@ function vertexEndpointConfig(profile, oaiSettings) {
 
 // ── 연결 프로필 해석 ──────────────────────────────────────
 function resolveProfileApi(settings, profileName, kind = 'text') {
-    const userDir = path.join(ST_ROOT, 'data', settings.userHandle || 'default-user');
+    const userDir = userDataDir(settings);
     const stSettings = loadJson(path.join(userDir, 'settings.json'), {});
     const secrets = loadJson(path.join(userDir, 'secrets.json'), {});
 
@@ -213,7 +243,7 @@ function readReferenceFile(candidates, label, filename) {
 function readAvatar(settings, avatarFile) {
     if (!avatarFile) return null;
     const filename = path.basename(String(avatarFile));
-    const userDir = path.join(ST_ROOT, 'data', settings.userHandle || 'default-user');
+    const userDir = userDataDir(settings);
     return readReferenceFile([
         path.join(userDir, 'characters', filename),
         path.join(ST_ROOT, 'public', 'characters', filename),
@@ -223,7 +253,7 @@ function readAvatar(settings, avatarFile) {
 function readPersonaAvatar(settings, avatarFile) {
     if (!avatarFile) return null;
     const filename = path.basename(String(avatarFile));
-    const userDir = path.join(ST_ROOT, 'data', settings.userHandle || 'default-user');
+    const userDir = userDataDir(settings);
     return readReferenceFile([
         path.join(userDir, 'User Avatars', filename),
         path.join(ST_ROOT, 'public', 'User Avatars', filename),
@@ -287,7 +317,7 @@ function readRecentChat(settings, memberOrName, limit = 12, persona = null, opti
     const charName = member.name || identityKey(member.avatar);
     if (!charName) return '';
 
-    const chatsRoot = path.join(ST_ROOT, 'data', settings.userHandle || 'default-user', 'chats');
+    const chatsRoot = path.join(userDataDir(settings), 'chats');
     const directoryNames = [...new Set([
         member.name,
         identityKey(member.avatar),
@@ -295,7 +325,10 @@ function readRecentChat(settings, memberOrName, limit = 12, persona = null, opti
     const files = [];
 
     for (const directoryName of directoryNames) {
-        const dir = path.join(chatsRoot, directoryName);
+        // 디렉토리명에 경로 구분자·상위 이동이 들어오면 무시 (경로 탈출 차단)
+        const safeName = String(directoryName);
+        if (safeName.includes('/') || safeName.includes('\\') || safeName.includes('..')) continue;
+        const dir = path.join(chatsRoot, safeName);
         try {
             for (const file of fs.readdirSync(dir).filter(name => name.endsWith('.jsonl'))) {
                 const absolute = path.join(dir, file);
@@ -351,9 +384,22 @@ function readRecentChat(settings, memberOrName, limit = 12, persona = null, opti
 function readImageAsBase64(webPath) {
     if (!webPath) return null;
     try {
-        const rel = webPath.replace(/^\/+/, '');
-        const abs = path.join(ST_ROOT, 'public', rel);
-        const buf = fs.readFileSync(abs);
+        const rel = String(webPath).replace(/^\/+/, '');
+        const abs = path.resolve(PUBLIC_ROOT, rel);
+        // public 폴더 내부의 실제 이미지 파일만 허용한다.
+        if (!isPathInside(PUBLIC_ROOT, abs) || !IMAGE_EXTENSIONS.has(path.extname(abs).toLowerCase())) {
+            console.warn('[chatlog] 이미지 읽기 거부 (public 폴더 밖):', webPath);
+            return null;
+        }
+        const stat = fs.statSync(abs);
+        if (!stat.isFile()) return null;
+        const realPublicRoot = fs.realpathSync(PUBLIC_ROOT);
+        const realFile = fs.realpathSync(abs);
+        if (!isPathInside(realPublicRoot, realFile)) {
+            console.warn('[chatlog] 이미지 읽기 거부 (심볼릭 링크 경로):', webPath);
+            return null;
+        }
+        const buf = fs.readFileSync(realFile);
         const ext = path.extname(abs).slice(1).toLowerCase();
         const mime = ext === 'jpg' ? 'image/jpeg' : `image/${ext || 'png'}`;
         return { mime, data: buf.toString('base64') };
@@ -1715,6 +1761,8 @@ async function generateImage(
 }
 
 module.exports = {
+    safeUserHandle,
+    userDataDir,
     resolveProfileApi,
     resolveTextApi,
     resolveImageApi,
