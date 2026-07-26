@@ -113,7 +113,11 @@ function resolveProfileApi(settings, profileName, kind = 'text') {
     const oaiSettings = stSettings?.oai_settings || stSettings?.openai_settings || {};
 
     if (source === 'vertexai') {
-        const endpoint = vertexEndpointConfig(profile, oaiSettings);
+        // Connection Manager 프로필에 명시된 endpoint와 ST 전역 설정에 남은
+        // endpoint를 구분한다. Express 프로필에 프로젝트 ID가 없을 때 전역의
+        // 오래된 프로젝트 ID를 끌어오면 ST의 정상적인 projectless 요청과 달라진다.
+        const profileEndpoint = vertexEndpointConfig(profile, {});
+        const fallbackEndpoint = vertexEndpointConfig({}, oaiSettings);
         const exactServiceAccount = parseServiceAccount(secretValue(
             secrets,
             'vertexai_service_account_json',
@@ -137,6 +141,19 @@ function resolveProfileApi(settings, profileName, kind = 'text') {
                 : preferredMode === 'full' || (serviceAccount && !expressKey)
                     ? 'full'
                     : 'express';
+        const profileProjectId = profile.vertexai_project
+            || profile.vertexai_project_id
+            || profile.projectId
+            || profile.project_id
+            || profile['project-id']
+            || profileEndpoint.projectId
+            || '';
+        const fullProjectId = serviceAccount?.project_id
+            || profileProjectId
+            || fallbackEndpoint.projectId
+            || oaiSettings.vertexai_project_id
+            || oaiSettings.vertexai_project
+            || '';
         return {
             name: profile.name,
             source: 'vertexai',
@@ -144,25 +161,19 @@ function resolveProfileApi(settings, profileName, kind = 'text') {
             authMode,
             serviceAccount,
             apiKey: authMode === 'express' ? expressKey : '',
-            projectId: serviceAccount?.project_id
-                || profile.vertexai_project
-                || profile.vertexai_project_id
-                || profile.projectId
-                || profile.project_id
-                || profile['project-id']
-                || endpoint.projectId
-                || oaiSettings.vertexai_express_project_id
-                || oaiSettings.vertexai_project_id
-                || oaiSettings.vertexai_project
-                || '',
+            // ST Express와 동일하게 프로필 자체에 프로젝트가 없으면
+            // projectless publisher endpoint를 사용한다. Full OAuth만 전역
+            // 프로젝트 설정으로 폴백한다.
+            projectId: authMode === 'express' ? profileProjectId : fullProjectId,
             region: profile.vertexai_region
                 || profile.vertexai_location
                 || profile.region
                 || profile.location
-                || endpoint.region
+                || profileEndpoint.region
                 || (/^[a-z]+(?:-[a-z0-9]+)+\d$|^global$/i.test(String(profile['api-url'] || ''))
                     ? profile['api-url']
                     : '')
+                || fallbackEndpoint.region
                 || oaiSettings.vertexai_region
                 || oaiSettings.vertexai_location
                 || 'global',
@@ -239,7 +250,7 @@ function resolveImageApi(settings) {
     if (!/(?:image|imagen|nano)/i.test(imageModel)) {
         throw new Error(`챗로그 설정값이 이미지 모델이 아닙니다 (${imageModel})`);
     }
-    if (!api.projectId) {
+    if (api.authMode === 'full' && !api.projectId) {
         throw new Error(`이미지 연결 프로필 "${api.name}"의 프로젝트 ID를 찾을 수 없습니다`);
     }
     if (api.authMode === 'express' && !api.apiKey) {
@@ -451,12 +462,18 @@ function googleUrl({
     projectId,
     region = 'global',
 }) {
-    if (!projectId) throw new Error('Vertex Express 프로젝트 ID가 비어 있습니다');
     const location = region || 'global';
-    return `https://aiplatform.googleapis.com/v1/projects/${encodeURIComponent(projectId)}`
-        + `/locations/${encodeURIComponent(location)}/publishers/google/models/`
-        + `${encodeURIComponent(model)}:generateContent`
-        + `?key=${encodeURIComponent(apiKey)}`;
+    const modelPath = `${encodeURIComponent(model)}:generateContent`;
+    if (projectId) {
+        return `https://aiplatform.googleapis.com/v1/projects/${encodeURIComponent(projectId)}`
+            + `/locations/${encodeURIComponent(location)}/publishers/google/models/`
+            + `${modelPath}?key=${encodeURIComponent(apiKey)}`;
+    }
+    const host = location === 'global'
+        ? 'aiplatform.googleapis.com'
+        : `${location}-aiplatform.googleapis.com`;
+    return `https://${host}/v1/publishers/google/models/`
+        + `${modelPath}?key=${encodeURIComponent(apiKey)}`;
 }
 
 async function callGoogle(cfg, body) {

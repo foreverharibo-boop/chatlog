@@ -25,6 +25,7 @@ Windows PowerShell:
 
 ```powershell
 cd "C:\SillyTavern\data\default-user\extensions\chatlog"
+Set-ExecutionPolicy -Scope Process Bypass -Force
 Unblock-File .\install-windows.ps1
 .\install-windows.ps1 -SillyTavernPath "C:\SillyTavern"
 ```
@@ -33,9 +34,9 @@ Unblock-File .\install-windows.ps1
 
 기존 수동 설치에서 전환하는 경우에도 같은 명령을 사용합니다.
 
-- 기존 `plugins/chatlog` 폴더는 `plugins/chatlog-backup-날짜-번호`로 남습니다.
+- 기존 서버 폴더와 연결 정보는 플러그인 로더가 읽지 않는 `SillyTavern/chatlog-backups/날짜-번호` 아래에 남습니다.
 - 기존 `data.json`과 `settings.json`은 새 확장 안의 `server` 폴더로 복사됩니다.
-- 기존 `config.yaml`은 `config.yaml.chatlog-backup-날짜-번호`로 남습니다.
+- 기존 `config.yaml`도 같은 `chatlog-backups/날짜-번호` 폴더에 보관됩니다.
 - 설치 후 `plugins/chatlog`는 확장 안의 `server` 폴더를 가리키는 바로가기가 됩니다.
 - 이후 GitHub 확장 업데이트로 클라이언트와 서버 코드가 함께 갱신되며, 서버 코드 변경을 적용하려면 SillyTavern을 재시작해야 합니다.
 
@@ -383,3 +384,14 @@ public/user/images/chatlog/     # 생성된 이미지
 - 인물 이름과 텍스트 모델의 외형 설명은 이미지의 얼굴 정체성 결정에 사용하지 않고 장면 판단에만 사용
 - 기존 두 번의 이미지 시도가 모두 실패할 경우 같은 프사를 유지한 정체성 우선 프롬프트로 한 번 더 재생성해 최초 요청 포함 최대 3회 시도
 - 인증·권한·할당량 오류는 기존처럼 추가 요청 없이 즉시 중단해 불필요한 비용 방지
+
+## v0.8.8 변경 사항
+
+- Vertex Express 프로필에 프로젝트 ID가 명시되지 않은 경우 SillyTavern과 동일한 projectless publisher endpoint 사용
+- 다른 ST 전역 설정에 남은 오래된 프로젝트 ID를 현재 Express 프로필에 강제로 붙이지 않도록 분리
+- 프로젝트 ID가 프로필에 명시된 Express 연결과 Full OAuth 연결의 기존 project-scoped 경로는 유지
+- Express 이미지 연결은 프로젝트 ID 없이도 동일한 projectless endpoint를 사용할 수 있도록 수정
+- Windows·Termux 설치 백업을 `plugins` 바깥의 `chatlog-backups`에 저장하도록 변경
+- 이전 서버 연결이 삭제되어 깨진 Junction·심볼릭 링크가 남아 있어도 새 연결로 복구
+- 기존 서버의 `data.json`·`settings.json`은 새 서버 폴더로 옮겨 게시물과 설정을 보존
+- 서버 백업 항목을 SillyTavern이 플러그인으로 오인해 전체 플러그인 로딩이 중단되던 문제 수정

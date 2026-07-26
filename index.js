@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.8.7';
+const CHATLOG_VERSION = '0.8.8';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};

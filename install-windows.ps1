@@ -42,8 +42,9 @@ $Config = Join-Path $StRoot "config.yaml"
 $TimeStamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $RandomSuffix = Get-Random -Minimum 1000 -Maximum 9999
 $Stamp = "$TimeStamp-$RandomSuffix"
-$PluginBackup = Join-Path $PluginsDir "chatlog-backup-$Stamp"
-$ConfigBackup = Join-Path $StRoot "config.yaml.chatlog-backup-$Stamp"
+$BackupRoot = Join-Path $StRoot "chatlog-backups\$Stamp"
+$PluginBackup = Join-Path $BackupRoot "server"
+$ConfigBackup = Join-Path $BackupRoot "config.yaml"
 
 if (-not (Test-Path -LiteralPath (Join-Path $StRoot "server.js"))) {
     throw "선택한 폴더는 SillyTavern 폴더가 아닙니다: $StRoot"
@@ -72,24 +73,54 @@ if ($Answer -notmatch "^(y|yes)$") {
 }
 
 New-Item -ItemType Directory -Path $PluginsDir -Force | Out-Null
+New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
 
-if (Test-Path -LiteralPath $Target) {
-    $TargetItem = Get-Item -LiteralPath $Target -Force
+$TargetItem = Get-ChildItem -LiteralPath $PluginsDir -Force |
+    Where-Object { $_.Name -eq "chatlog" } |
+    Select-Object -First 1
+
+if ($null -ne $TargetItem) {
     $IsLink = ($TargetItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
 
     if ($IsLink) {
-        Move-Item -LiteralPath $Target -Destination $PluginBackup
-        try {
-            New-Item -ItemType Junction -Path $Target -Target $Source | Out-Null
+        $CurrentTarget = [string](@($TargetItem.Target)[0])
+        $CurrentResolved = $null
+        $SourceResolved = (Resolve-Path -LiteralPath $Source).Path
+        if ($CurrentTarget -and (Test-Path -LiteralPath $CurrentTarget)) {
+            $CurrentResolved = (Resolve-Path -LiteralPath $CurrentTarget).Path
         }
-        catch {
+
+        if ($CurrentResolved -and
+            [string]::Equals($CurrentResolved, $SourceResolved, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Write-Host "서버 Junction은 이미 정상입니다."
+        }
+        else {
             if (Test-Path -LiteralPath $Target) {
-                [System.IO.Directory]::Delete($Target)
+                foreach ($RuntimeFile in @("data.json", "settings.json")) {
+                    $OldRuntime = Join-Path $Target $RuntimeFile
+                    $NewRuntime = Join-Path $Source $RuntimeFile
+                    if (Test-Path -LiteralPath $OldRuntime) {
+                        Copy-Item -LiteralPath $OldRuntime -Destination $NewRuntime -Force
+                    }
+                }
             }
-            Move-Item -LiteralPath $PluginBackup -Destination $Target
-            throw "Junction 갱신에 실패해 기존 연결을 복구했습니다. $($_.Exception.Message)"
+
+            Write-Utf8NoBom -Path (Join-Path $BackupRoot "previous-server-link.txt") -Content $CurrentTarget
+            [System.IO.Directory]::Delete($Target)
+            try {
+                New-Item -ItemType Junction -Path $Target -Target $Source | Out-Null
+            }
+            catch {
+                if (Test-Path -LiteralPath $Target) {
+                    [System.IO.Directory]::Delete($Target)
+                }
+                if ($CurrentTarget) {
+                    New-Item -ItemType Junction -Path $Target -Target $CurrentTarget | Out-Null
+                }
+                throw "Junction 갱신에 실패해 기존 연결을 복구했습니다. $($_.Exception.Message)"
+            }
+            Write-Host "기존 서버 연결 정보를 plugins 밖에 백업하고 새로 연결했습니다: $BackupRoot"
         }
-        Write-Host "기존 바로가기를 백업하고 새 챗로그 서버 폴더로 연결했습니다: $PluginBackup"
     }
     else {
         foreach ($RuntimeFile in @("data.json", "settings.json")) {
@@ -142,5 +173,5 @@ if ($LASTEXITCODE -ne 0) { throw "server/paths.js 문법 검사에 실패했습�
 
 Write-Host ""
 Write-Host "설치가 완료되었습니다."
-Write-Host "config.yaml 백업: $ConfigBackup"
+Write-Host "챗로그 설치 백업: $BackupRoot"
 Write-Host "이제 SillyTavern을 완전히 종료한 뒤 다시 실행하세요."

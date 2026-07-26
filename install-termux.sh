@@ -33,8 +33,9 @@ SOURCE="$SCRIPT_DIR/server"
 TARGET="$ST_ROOT/plugins/chatlog"
 CONFIG="$ST_ROOT/config.yaml"
 STAMP="$(date +%Y%m%d-%H%M%S)-$$"
-PLUGIN_BACKUP="$ST_ROOT/plugins/chatlog-backup-$STAMP"
-CONFIG_BACKUP="$ST_ROOT/config.yaml.chatlog-backup-$STAMP"
+BACKUP_ROOT="$ST_ROOT/chatlog-backups/$STAMP"
+PLUGIN_BACKUP="$BACKUP_ROOT/server"
+CONFIG_BACKUP="$BACKUP_ROOT/config.yaml"
 
 if [ ! -f "$ST_ROOT/server.js" ] || [ ! -f "$SOURCE/index.js" ] || [ ! -f "$SOURCE/paths.js" ]; then
     printf 'SillyTavern 또는 챗로그 서버 파일을 확인할 수 없습니다.\n'
@@ -58,18 +59,29 @@ case "$answer" in
 esac
 
 mkdir -p "$ST_ROOT/plugins"
+mkdir -p "$BACKUP_ROOT"
 
 if [ -L "$TARGET" ]; then
     current_target="$(readlink -f "$TARGET" 2>/dev/null || true)"
     source_target="$(readlink -f "$SOURCE" 2>/dev/null || printf '%s' "$SOURCE")"
     if [ "$current_target" != "$source_target" ]; then
-        mv "$TARGET" "$PLUGIN_BACKUP"
+        previous_link="$(readlink "$TARGET")"
+        if [ -d "$TARGET" ]; then
+            for runtime_file in data.json settings.json; do
+                if [ -f "$TARGET/$runtime_file" ]; then
+                    cp -p "$TARGET/$runtime_file" "$SOURCE/$runtime_file"
+                fi
+            done
+        fi
+        printf '%s\n' "$previous_link" > "$BACKUP_ROOT/previous-server-link.txt"
+        rm "$TARGET"
         if ! ln -s "$SOURCE" "$TARGET"; then
-            mv "$PLUGIN_BACKUP" "$TARGET"
+            rm -f "$TARGET"
+            ln -s "$previous_link" "$TARGET"
             printf '바로가기 생성에 실패해 기존 연결을 복구했습니다.\n'
             exit 1
         fi
-        printf '기존 바로가기를 백업하고 새로 연결했습니다: %s\n' "$PLUGIN_BACKUP"
+        printf '기존 서버 연결 정보를 plugins 밖에 백업하고 새로 연결했습니다: %s\n' "$BACKUP_ROOT"
     else
         printf '서버 바로가기는 이미 정상입니다.\n'
     fi
@@ -106,6 +118,6 @@ node --check "$SOURCE/ai.js"
 node --check "$SOURCE/paths.js"
 
 printf '\n설치가 완료되었습니다.\n'
-printf 'config.yaml 백업: %s\n' "$CONFIG_BACKUP"
+printf '챗로그 설치 백업: %s\n' "$BACKUP_ROOT"
 printf '이제 SillyTavern을 완전히 종료한 뒤 다시 실행하세요:\n'
 printf '  cd "%s" && npm start\n' "$ST_ROOT"
