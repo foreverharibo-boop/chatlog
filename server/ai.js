@@ -1060,23 +1060,130 @@ function characterPhotoBias(member) {
     return Math.max(-15, Math.min(15, (count(selfieTerms) - count(everydayTerms)) * 5));
 }
 
-function choosePhotoMode(member, roll = 50, recentModes = []) {
+function ratioAwareRunLimit(chance) {
+    const normalized = Math.max(0, Math.min(100, Number(chance) || 0));
+    if (normalized === 0 || normalized === 100) return Number.POSITIVE_INFINITY;
+    const opposite = 100 - normalized;
+    if (normalized <= opposite) return 2;
+    return Math.max(2, Math.ceil(normalized / opposite));
+}
+
+function consecutiveRun(history = []) {
+    if (!history.length) return { value: null, length: 0 };
+    const value = history[0];
+    let length = 0;
+    for (const item of history) {
+        if (item !== value) break;
+        length += 1;
+    }
+    return { value, length };
+}
+
+function ratioBalancedChance(chance, history = [], positiveValue, windowSize = 20) {
+    const normalized = Math.max(0, Math.min(100, Number(chance) || 0));
+    if (normalized === 0 || normalized === 100) return normalized;
+    const window = Math.max(2, Math.floor(Number(windowSize) || 20));
+    const relevant = history.slice(0, window - 1);
+    const positiveCount = relevant.filter(value => value === positiveValue).length;
+    const desiredPositiveCount = (relevant.length + 1) * normalized / 100;
+    return Math.max(0, Math.min(100, (desiredPositiveCount - positiveCount) * 100));
+}
+
+function choosePhotoMode(member, roll = 50, recentModes = [], baseSelfieChance = 50) {
     const bias = characterPhotoBias(member);
-    const selfieChance = Math.max(35, Math.min(65, 50 + bias));
+    const baseChance = Math.max(0, Math.min(100, Number(baseSelfieChance) || 0));
+    const selfieChance = baseChance === 0 || baseChance === 100
+        ? baseChance
+        : Math.max(0, Math.min(100, baseChance + bias));
     const history = (recentModes || []).filter(mode => mode === 'selfie' || mode === 'everyday');
-    const lastTwo = history.slice(0, 2);
-    const repeated = lastTwo.length === 2 && lastTwo.every(mode => mode === lastTwo[0]);
-    const mode = repeated
-        ? lastTwo[0] === 'selfie' ? 'everyday' : 'selfie'
-        : Number(roll) < selfieChance ? 'selfie' : 'everyday';
+    const streak = consecutiveRun(history);
+    const streakChance = streak.value === 'selfie' ? selfieChance : 100 - selfieChance;
+    const streakLimit = ratioAwareRunLimit(streakChance);
+    const forcedOpposite = streak.value !== null
+        && Number.isFinite(streakLimit)
+        && streak.length >= streakLimit;
+    const balancedSelfieChance = ratioBalancedChance(selfieChance, history, 'selfie');
+    const mode = forcedOpposite
+        ? streak.value === 'selfie' ? 'everyday' : 'selfie'
+        : Number(roll) < balancedSelfieChance ? 'selfie' : 'everyday';
     return {
         mode,
         photoMode: mode,
         bias,
+        baseSelfieChance: baseChance,
         selfieChance,
-        forcedOpposite: repeated,
-        forcedFrom: repeated ? lastTwo[0] : null,
+        balancedSelfieChance,
+        forcedOpposite,
+        forcedFrom: forcedOpposite ? streak.value : null,
+        streakLength: streak.length,
+        streakLimit: Number.isFinite(streakLimit) ? streakLimit : null,
     };
+}
+
+function chooseCompanionSelfie({
+    photoMode = 'everyday',
+    eligible = false,
+    chance = 45,
+    roll = 50,
+    recentCompanionFlags = [],
+} = {}) {
+    const normalizedChance = Math.max(0, Math.min(100, Number(chance) || 0));
+    if (photoMode !== 'selfie' || !eligible) {
+        return {
+            includePersona: false,
+            chance: normalizedChance,
+            forcedOpposite: false,
+            forcedFrom: null,
+            forcedAfterSoloRun: false,
+            streakLength: 0,
+            streakLimit: null,
+        };
+    }
+    const recent = (recentCompanionFlags || [])
+        .filter(value => typeof value === 'boolean');
+    const streak = consecutiveRun(recent);
+    const streakChance = streak.value === true ? normalizedChance : 100 - normalizedChance;
+    const streakLimit = ratioAwareRunLimit(streakChance);
+    const forcedOpposite = normalizedChance > 0
+        && normalizedChance < 100
+        && streak.value !== null
+        && Number.isFinite(streakLimit)
+        && streak.length >= streakLimit;
+    const balancedCompanionChance = ratioBalancedChance(
+        normalizedChance,
+        recent,
+        true,
+    );
+    const includePersona = normalizedChance === 100
+        ? true
+        : normalizedChance === 0
+            ? false
+            : forcedOpposite
+                ? !streak.value
+                : Number(roll) < balancedCompanionChance;
+    const forcedAfterSoloRun = forcedOpposite && streak.value === false;
+    return {
+        includePersona,
+        chance: normalizedChance,
+        balancedCompanionChance,
+        forcedOpposite,
+        forcedFrom: forcedOpposite ? streak.value : null,
+        forcedAfterSoloRun,
+        streakLength: streak.length,
+        streakLimit: Number.isFinite(streakLimit) ? streakLimit : null,
+    };
+}
+
+function relationAllowsCompanion(room, member, persona) {
+    const linked = room?.memberPersonas?.[member?.avatar];
+    if (linked && samePersona(linked, persona)) return true;
+    if (!samePersona(displayPersona({}, room), persona)) return false;
+    const relation = exactRelationFor(room, member?.avatar, 'user');
+    if (!relation || !['manual', 'explicit'].includes(relation.confidence)) return false;
+    if (relation.type === 'romantic' || relation.type === 'spouse') return true;
+    if (relation.type !== 'custom') return false;
+    return /(?:연인|배우자|애인|여친|남친|아내|남편|약혼|커플|lover|partner|spouse|wife|husband|girlfriend|boyfriend|dating)/iu
+        .test(`${relation.label || ''} ${relation.note || ''}`);
 }
 
 function othersBlock(post, member, excludeCommentId = null) {
@@ -1136,6 +1243,9 @@ function characterRelationshipBlock(room, post, member) {
 function postPhotoLabel(post) {
     if (!post?.image) return '(사진 없음)';
     if (post.photoMode === 'everyday') return '(사람이 나오지 않는 일상 사진 첨부됨)';
+    if (post.photoMode === 'selfie' && post.withPersona) {
+        return `(게시자가 연결 페르소나 ${post.companionName || '동반자'}와 함께 직접 찍은 셀카 첨부됨 — 저장된 관계만 적용할 것)`;
+    }
     if (post.photoMode === 'selfie') return '(게시자가 직접 찍은 셀카 첨부됨)';
     return '(사진 첨부됨 — 사진만 보고 인물 관계를 추측하지 말 것)';
 }
@@ -1477,6 +1587,18 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
     const temporal = seasonContext(slotAt);
     const photoMode = decision.photoMode === 'selfie' ? 'selfie' : 'everyday';
     const everydayPhoto = photoMode === 'everyday';
+    let personaReference = null;
+    if (!everydayPhoto && persona?.avatar && relationAllowsCompanion(room, member, persona)) {
+        personaReference = readPersonaAvatar(settings, persona.avatar);
+    }
+    const companionDecision = chooseCompanionSelfie({
+        photoMode,
+        eligible: !!personaReference?.data,
+        chance: settings.partnerSelfieChance ?? 45,
+        roll: decision.companionRoll ?? 50,
+        recentCompanionFlags: decision.recentCompanionFlags || [],
+    });
+    const companionSelfie = companionDecision.includePersona;
     const photoModeRule = everydayPhoto
         ? [
             '[이번 게시물의 사진 유형 — 일상 사진]',
@@ -1485,12 +1607,23 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
             '- 셀카, 얼굴, 손을 제외한 신체, 거울 속 사람, 배경 행인처럼 식별 가능한 사람을 넣지 않는다.',
             '- personaVisible은 반드시 false, personaVisualIdentity와 visualIdentity는 빈 문자열로 둔다.',
         ].join('\n')
-        : [
+        : companionSelfie
+            ? [
+                '[이번 게시물의 사진 유형 — 연결 페르소나 동반 셀카]',
+                `- 게시 캐릭터(${member.name})가 직접 찍은 셀카에 연결 페르소나(${personaName})도 함께 보여야 한다.`,
+                `- 두 사람의 얼굴과 신체를 합치지 말고 ${member.name}와 ${personaName}를 서로 다른 두 사람으로 선명하게 구분한다.`,
+                `- scene에 반드시 "${member.name} taking a smartphone selfie together with ${personaName}"를 명시한다.`,
+                '- 제3자가 찍어준 사진, 멀리서 찍힌 전신 사진, 몰래 찍은 사진, 감시 카메라, 삼각대, 영화 스틸 같은 구도는 금지한다.',
+                '- personaVisible은 반드시 true로 하고 personaVisualIdentity를 채운다.',
+                '- 관계는 최근 대화와 저장된 관계에 있는 만큼만 표현하며, 새로운 관계를 만들어내지 않는다.',
+            ].join('\n')
+            : [
             '[이번 게시물의 사진 유형 — 셀카]',
             `- 게시 캐릭터(${member.name})가 직접 찍은 전면 카메라 셀카, 팔을 뻗은 셀카 또는 거울 셀카여야 한다.`,
-            '- 다른 사람이 함께 나오면 게시 캐릭터와 같이 찍은 그룹 셀카로 묘사한다.',
+            `- 이번에는 ${member.name}만 나오며 연결 페르소나나 다른 식별 가능한 사람을 넣지 않는다.`,
             '- 제3자가 찍어준 사진, 멀리서 찍힌 전신 사진, 몰래 찍은 사진, 감시 카메라, 삼각대, 영화 스틸 같은 구도는 금지한다.',
             `- scene에 반드시 "front-facing smartphone selfie taken by ${member.name}" 또는 "mirror selfie taken by ${member.name}"를 명시한다.`,
+            '- personaVisible은 반드시 false, personaVisualIdentity는 빈 문자열로 둔다.',
         ].join('\n');
 
     const system = [
@@ -1535,7 +1668,9 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
         '- post가 false면 caption과 scene은 빈 문자열로 둔다.',
         '- post가 true면 visualIdentity에는 캐릭터 카드에서 확인되는 성별, 대략적 나이, 머리, 얼굴, 체격, 현재 옷처럼 사진에 필요한 외형만 짧게 쓴다.',
         '- visualIdentity에 성격, 관계, 과거사, 직업 설명, 유저 정보, 신체 상태에 관한 추측을 넣지 마라.',
-        `- 사진 안에 유저 페르소나(${personaName})가 실제로 보일 때만 personaVisible을 true로 한다.`,
+        companionSelfie
+            ? `- 이번 사진에는 연결 페르소나(${personaName})가 반드시 보인다. personaVisible은 true다.`
+            : `- 이번 사진에는 연결 페르소나(${personaName})가 보이지 않는다. personaVisible은 false다.`,
         `- personaVisible이 true면 personaVisualIdentity에는 유저 페르소나 설명에서 확인되는 외형과 계절에 맞는 현재 옷차림만 쓴다. 캐릭터(${member.name})의 외형과 섞지 마라.`,
         '- personaVisible이 false면 personaVisualIdentity는 빈 문자열로 둔다.',
         '',
@@ -1561,8 +1696,11 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
     const user = [
         `현재 날짜와 시각은 ${temporal.label}, ${timeLabel(slotAt)}이다.`,
         `이번 랜덤 게시 충동은 ${decision.randomRoll ?? 50}/99이다.`,
-        `이번 사진 유형은 ${everydayPhoto ? '사람 없는 일상 사진' : '셀카'}로 이미 결정됐다. 다른 유형으로 바꾸지 마라.`,
-        `기본 셀카 확률은 50%이며 캐릭터 카드 보정 후 ${decision.selfieChance ?? 50}%다.${decision.forcedOpposite ? ' 같은 유형이 2번 연속되어 이번에는 반대 유형으로 강제됐다. 반드시 강제된 유형을 지킨다.' : ''}`,
+        `이번 사진 유형은 ${everydayPhoto ? '사람 없는 일상 사진' : companionSelfie ? `연결 페르소나 ${personaName}와 함께 찍는 셀카` : '혼자 찍는 셀카'}로 이미 결정됐다. 다른 유형으로 바꾸지 마라.`,
+        `설정한 셀카 기본 비율은 ${decision.baseSelfieChance ?? 50}%이며 캐릭터 카드 보정 후 ${decision.selfieChance ?? 50}%다.${decision.forcedOpposite ? ` 설정 비율에 따른 같은 유형 연속 한도 ${decision.streakLimit}회에 도달해 이번에는 반대 유형으로 강제됐다. 반드시 강제된 유형을 지킨다.` : ''}`,
+        !everydayPhoto
+            ? `셀카 중 연결 페르소나 동반 설정은 ${companionDecision.chance}%다.${companionDecision.forcedOpposite ? ` 설정 비율에 따른 ${companionDecision.forcedFrom ? '동반' : '혼자'} 셀카 연속 한도 ${companionDecision.streakLimit}회에 도달해 이번에는 반대 구성으로 강제됐다.` : ''}`
+            : '',
         `활동 시간 기준 마지막 게시 후 약 ${Number(decision.activeHoursSinceLastPost || 0).toFixed(1)}시간 지났다.`,
         forcePost
             ? '이번에는 반드시 올린다. 무엇을 찍어 올릴지 JSON으로 답하라.'
@@ -1598,25 +1736,24 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
                     name: member.name,
                     image: readAvatar(settings, member.avatar),
                 }];
-            if (!everydayPhoto && (parsed.personaVisible === true || parsed.personaVisible === 'true')) {
-                const personaReference = readPersonaAvatar(settings, persona.avatar);
-                if (!personaReference?.data) {
-                    throw new Error('함께 나온 페르소나의 참조 프사가 없어 인물 사진 생성을 건너뜀');
-                }
+            if (companionSelfie) {
                 references.push({
                     role: 'user persona',
                     name: personaName,
                     image: personaReference,
                 });
             }
+            const scene = companionSelfie
+                ? `${parsed.scene}. Both ${member.name} and ${personaName} must be visibly present as two separate people in the selfie.`
+                : parsed.scene;
             image = await generateImage(
                 settings,
-                parsed.scene,
+                scene,
                 references,
                 member,
-                persona,
+                companionSelfie ? persona : null,
                 parsed.visualIdentity,
-                parsed.personaVisualIdentity,
+                companionSelfie ? parsed.personaVisualIdentity : '',
                 `${temporal.label} (${temporal.seasonEn}), ${timeLabel(slotAt)}, ${temporal.daypartEn}. ${temporal.lightingEn}`,
                 photoMode,
             );
@@ -1632,6 +1769,8 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
         text: (parsed.caption || '').slice(0, 60),
         image,
         photoMode,
+        withPersona: companionSelfie,
+        companionName: companionSelfie ? personaName : null,
     };
 }
 
@@ -1804,7 +1943,12 @@ module.exports = {
     hourSlotKey,
     seasonContext,
     characterPhotoBias,
+    ratioAwareRunLimit,
+    consecutiveRun,
+    ratioBalancedChance,
     choosePhotoMode,
+    chooseCompanionSelfie,
+    relationAllowsCompanion,
     chatPersonaScore,
     characterRelationshipBlock,
     displayPersona,

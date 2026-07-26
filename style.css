@@ -845,6 +845,14 @@ body > .chatlog-sheet * {
     flex-basis: 70px !important;
     width: 70px !important;
 }
+.chatlog-photo-ratio-row {
+    gap: 5px;
+    flex-wrap: wrap;
+}
+.chatlog-photo-ratio-row .chatlog-short-input {
+    flex-basis: 58px !important;
+    width: 58px !important;
+}
 .chatlog-mini-button {
     width: auto !important;
     min-width: max-content;
@@ -981,6 +989,10 @@ body > .chatlog-sheet * {
     .chatlog-number-pair .chatlog-short-input {
         flex-basis: 58px !important;
         width: 58px !important;
+    }
+    .chatlog-photo-ratio-row .chatlog-short-input {
+        flex-basis: 52px !important;
+        width: 52px !important;
     }
     .chatlog-runtime-status > div {
         grid-template-columns: 76px minmax(0, 1fr);

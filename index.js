@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.8.3';
+const CHATLOG_VERSION = '0.8.5';
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -350,6 +350,30 @@ const SETTINGS_HTML = `
         </label>
       </div>
 
+      <div class="chatlog-setting-section">사진 구성</div>
+
+      <div class="chatlog-setting-field">
+        <label>사진 유형 비율</label>
+        <div class="chatlog-setting-control chatlog-control-row chatlog-number-pair chatlog-photo-ratio-row">
+          <span>일상</span>
+          <input id="chatlog-everyday-photo-chance" type="number" min="0" max="100" class="text_pole chatlog-short-input">
+          <span>%</span>
+          <span>셀카</span>
+          <input id="chatlog-selfie-photo-chance" type="number" min="0" max="100" class="text_pole chatlog-short-input">
+          <span>%</span>
+        </div>
+      </div>
+      <small class="chatlog-setting-help">두 값은 자동으로 합계 100%가 됩니다. 최근 기록의 비율을 보정해 설정값에 가깝게 유지합니다. 캐릭터 카드 성격에 따라 셀카 비율이 최대 ±15% 보정되며, 높은 비율의 유형은 더 오래 이어질 수 있습니다.</small>
+
+      <div class="chatlog-setting-field">
+        <label for="chatlog-partner-selfie-chance">연결 페르소나 동반</label>
+        <div class="chatlog-setting-control chatlog-control-row">
+          <input id="chatlog-partner-selfie-chance" type="number" min="0" max="100" class="text_pole chatlog-short-input">
+          <span>셀카 중 %</span>
+        </div>
+      </div>
+      <small class="chatlog-setting-help">셀카가 선택됐을 때 해당 캐릭터에게 연결된 페르소나와 함께 찍을 비율입니다. 최근 셀카 기록의 동반 비율과 연속 한도를 함께 보정합니다. 0%면 혼자만 찍고, 참조 프사가 없으면 자동으로 혼자 셀카로 전환됩니다.</small>
+
       <div class="chatlog-setting-section">댓글과 반응</div>
 
       <div class="chatlog-setting-field">
@@ -536,6 +560,8 @@ function readImageModel() {
 const FALLBACK_SETTINGS = {
     profileName: '', imageProfileName: '',
     imageModel: 'gemini-3.1-flash-lite-image',
+    selfiePhotoChance: 50,
+    partnerSelfieChance: 45,
     commentDelayMinMin: 1, commentDelayMaxMin: 30,
     autoCleanup: false, cleanupAfterDays: 1, keepSaved: true,
     textMode: 'profile',
@@ -625,6 +651,12 @@ async function loadSettingsUi() {
     $('#chatlog-delay-min').val(s.commentDelayMinMin);
     $('#chatlog-delay-max').val(s.commentDelayMaxMin);
     $('#chatlog-char-comment-chance').val(s.characterCommentChance ?? 30);
+    const selfiePhotoChance = Math.max(0, Math.min(100,
+        Number(s.selfiePhotoChance ?? 50)));
+    $('#chatlog-selfie-photo-chance').val(selfiePhotoChance);
+    $('#chatlog-everyday-photo-chance').val(100 - selfiePhotoChance);
+    $('#chatlog-partner-selfie-chance').val(Math.max(0, Math.min(100,
+        Number(s.partnerSelfieChance ?? 45))));
     $('#chatlog-autoclean').prop('checked', !!s.autoCleanup);
     $('#chatlog-cleandays').val(s.cleanupAfterDays);
     $('#chatlog-keepsaved').prop('checked', !!s.keepSaved);
@@ -667,6 +699,10 @@ async function saveSettingsUi() {
         profileName: $('#chatlog-profile').val(),
         imageProfileName: $('#chatlog-image-profile').val(),
         imageModel: readImageModel(),
+        selfiePhotoChance: Math.max(0, Math.min(100,
+            Number($('#chatlog-selfie-photo-chance').val()) || 0)),
+        partnerSelfieChance: Math.max(0, Math.min(100,
+            Number($('#chatlog-partner-selfie-chance').val()) || 0)),
         followActiveProfile: $('#chatlog-follow-profile').is(':checked'),
         textMode: 'profile',
         commentDelayMinMin: Number($('#chatlog-delay-min').val()),
@@ -2489,6 +2525,16 @@ jQuery(async () => {
     $('#chatlog-follow-profile').on('change', function () {
         $('#chatlog-profile').prop('disabled', this.checked);
         if (this.checked) syncActiveConnectionProfile();
+    });
+    $('#chatlog-selfie-photo-chance').on('input change', function () {
+        const selfie = Math.max(0, Math.min(100, Number(this.value) || 0));
+        this.value = selfie;
+        $('#chatlog-everyday-photo-chance').val(100 - selfie);
+    });
+    $('#chatlog-everyday-photo-chance').on('input change', function () {
+        const everyday = Math.max(0, Math.min(100, Number(this.value) || 0));
+        this.value = everyday;
+        $('#chatlog-selfie-photo-chance').val(100 - everyday);
     });
     $(document).on('input', '#chatlog-active-from, #chatlog-active-to, #chatlog-interval', updateCostHint);
     ensureQuickOpenButton();

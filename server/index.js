@@ -53,6 +53,8 @@ let settings = {
     imageProjectId: '',                          // v0.7.13 이하 설정 호환용
     imageRegion: 'global',                       // v0.7.13 이하 설정 호환용
     userPersonaName: '',    // 유저 페르소나 이름 (클라이언트가 동기화)
+    selfiePhotoChance: 50,  // 전체 사진 중 셀카 기본 비율
+    partnerSelfieChance: 45, // 셀카 중 연결 페르소나 동반 비율
     commentDelayMinMin: 1,
     commentDelayMaxMin: 30,
     characterCommentChance: 30, // 다른 캐릭터 게시물에 댓글도 남길 확률
@@ -437,18 +439,24 @@ async function runJob(job) {
         );
         const forcePost = !!job.forcePost
             || activeHoursBetween(lastPostAt, effectiveSlotAt, room.schedule) >= maxSilenceHours;
-        const recentPhotoModes = (db.posts[room.id] || [])
+        const recentCharacterPosts = (db.posts[room.id] || [])
             .filter(post => post.author === member.avatar && post.photoMode)
-            .sort((a, b) => (b.slotAt ?? b.createdAt) - (a.slotAt ?? a.createdAt))
-            .map(post => post.photoMode);
+            .sort((a, b) => (b.slotAt ?? b.createdAt) - (a.slotAt ?? a.createdAt));
+        const recentPhotoModes = recentCharacterPosts.map(post => post.photoMode);
+        const recentCompanionFlags = recentCharacterPosts
+            .filter(post => post.photoMode === 'selfie')
+            .map(post => post.withPersona === true);
         const photoDecision = ai.choosePhotoMode(
             member,
             Math.floor(rand(0, 100)),
             recentPhotoModes,
+            settings.selfiePhotoChance ?? 50,
         );
         const result = await ai.generateCharacterCut(settings, room, member, effectiveSlotAt, {
             forcePost,
             randomRoll: Math.floor(rand(0, 100)),
+            companionRoll: Math.floor(rand(0, 100)),
+            recentCompanionFlags,
             activeHoursSinceLastPost: activeHoursBetween(lastPostAt, effectiveSlotAt, room.schedule),
             maxSilenceHours,
             ...photoDecision,
@@ -457,12 +465,19 @@ async function runJob(job) {
         if (hasCharacterPostInSlot(room.id, member.avatar, effectiveSlotAt)) {
             return { status: 'duplicate-skipped' };
         }
-        const { text, image, photoMode } = result;
+        const {
+            text,
+            image,
+            photoMode,
+            withPersona = false,
+            companionName = null,
+        } = result;
         const post = {
             id: uid('post'), roomId: room.id, author: job.charId,
             authorName: member.name,
             slotAt: effectiveSlotAt, createdAt: Date.now(),
             text, image, imageSource: 'generated', photoMode,
+            withPersona, companionName,
             read: false, comments: [], reactions: [],
         };
         (db.posts[room.id] ??= []).push(post);
