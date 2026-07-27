@@ -4,7 +4,8 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.8.8';
+const CHATLOG_VERSION = '0.8.9';
+const MAX_MANUAL_IMAGE_BYTES = 20 * 1024 * 1024;
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -1458,10 +1459,20 @@ function uploadSheet(room) {
             this.value = '';
             return;
         }
+        if (f.size > MAX_MANUAL_IMAGE_BYTES) {
+            showError('사진은 최대 20MB까지 올릴 수 있어요.');
+            this.value = '';
+            return;
+        }
         const reader = new FileReader();
         reader.onload = () => {
             imageData = reader.result;
             $sheet.find('.chatlog-preview').html(`<img src="${imageData}">`);
+        };
+        reader.onerror = () => {
+            imageData = null;
+            this.value = '';
+            showError('사진을 읽지 못했어요. 다른 사진으로 다시 시도해 주세요.');
         };
         reader.readAsDataURL(f);
     };
@@ -1497,19 +1508,14 @@ function uploadSheet(room) {
 }
 
 async function uploadImage(dataUrl) {
-    const res = await fetch('/api/images/upload', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...headers() },
-        body: JSON.stringify({
-            image: dataUrl.split(',')[1],
-            ch_name: 'chatlog',
-            filename: `post_${Date.now()}`,
-            format: 'png',
-        }),
+    const match = /^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=\s]+)$/i.exec(String(dataUrl || ''));
+    if (!match) throw new Error('사진 데이터를 읽을 수 없어요.');
+    const result = await api('/image/upload', {
+        mime: match[1].toLowerCase(),
+        image: match[2].replace(/\s+/g, ''),
     });
-    if (!res.ok) throw new Error('image upload ' + res.status);
-    const json = await res.json();
-    return json.path;
+    if (!result?.path) throw new Error('저장된 사진 경로를 받지 못했어요.');
+    return result.path;
 }
 
 // ── 하루로그 (같은 시간대는 한 장면에 나란히) ────────────
@@ -1995,6 +2001,14 @@ function buildCommentMessages(job) {
         ? (p.comments || []).find(c => c.id === job.replyToCommentId && c.author === 'user')
         : [...(p.comments || [])].reverse().find(c => c.author === 'user');
     const isReply = isOwnPost && !!targetUserComment;
+    const existingComments = (p.comments || [])
+        .filter(comment => comment.author !== m.avatar && comment.text)
+        .map(comment => `${comment.authorName || comment.author}: ${comment.text}`)
+        .slice(-8);
+    const recentComments = (job.recentComments || [])
+        .map(comment => String(comment || '').trim())
+        .filter(Boolean)
+        .slice(0, 12);
 
     const system = [
         `너는 "${m.name}"이다.`,
@@ -2010,6 +2024,12 @@ function buildCommentMessages(job) {
             ? `네가 "${job.roomName}" 로그에 올린 게시물에 ${userName}가 댓글을 달았다. [반드시 답할 댓글]에 직접 답댓글을 단다.`
             : `${authorName}가 "${job.roomName}" 로그에 올린 게시물에 댓글을 단다.`,
         COMMENT_RULES,
+        existingComments.length
+            ? `이미 이 게시물에 달린 댓글이다. 같은 문장 구조·핵심 소재·명령 방식을 재사용하지 마라:\n${existingComments.join('\n')}`
+            : '',
+        recentComments.length
+            ? `이 방의 최근 댓글이다. 단어만 바꿔 재작성하지 말고 완전히 다른 관점을 고르라:\n${recentComments.join('\n')}`
+            : '',
         isReply ? '- 유저 댓글과 무관한 새 화제나 사진 속 인물·옷의 소유자·사건을 추측하지 마라.' : '',
     ].filter(Boolean).join('\n');
 

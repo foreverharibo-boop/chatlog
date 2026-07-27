@@ -330,6 +330,19 @@ function enqueueEngagement(room, post) {
 
 const findPost = (roomId, postId) => (db.posts[roomId] || []).find(p => p.id === postId);
 const findMember = (room, avatar) => room.members.find(m => m.avatar === avatar);
+function recentRoomCommentTexts(roomId, excludePostId = null, limit = 18) {
+    return (db.posts[roomId] || [])
+        .filter(post => post.id !== excludePostId)
+        .flatMap(post => (post.comments || [])
+            .filter(comment => comment.author !== 'user' && comment.text)
+            .map(comment => ({
+                text: String(comment.text).trim(),
+                createdAt: Number(comment.createdAt || post.createdAt || 0),
+            })))
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .slice(0, limit)
+        .map(item => item.text);
+}
 function hasCharacterPostInSlot(roomId, charId, slotAt) {
     const key = ai.hourSlotKey(slotAt);
     return (db.posts[roomId] || []).some(post => post.author === charId
@@ -355,6 +368,7 @@ async function runJob(job) {
         const text = await ai.generateComment(settings, room, post, member, {
             replyToCommentId: job.replyToCommentId,
             commentIntent: job.commentIntent,
+            recentComments: recentRoomCommentTexts(job.roomId, job.postId),
         });
         if (!text || exposesInternalRoleLabel(text)) {
             return { status: 'comment-skipped', commented: false };
@@ -397,6 +411,7 @@ async function runJob(job) {
         const result = await ai.generateEngagement(settings, room, post, member, {
             commentWanted: job.commentWanted === true,
             commentIntent: job.commentIntent,
+            recentComments: recentRoomCommentTexts(job.roomId, job.postId),
         });
         post.reactions ??= [];
         const existing = post.reactions.findIndex(reaction => reaction.author === member.avatar);
@@ -527,6 +542,88 @@ async function executeJob(job, allowRetry = true) {
 const PUBLIC_DIR = path.resolve(ST_ROOT, 'public');
 const CHATLOG_IMAGE_DIR = path.resolve(ST_ROOT, 'public', 'user', 'images', 'chatlog');
 const CHATLOG_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.avif']);
+const MAX_MANUAL_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_MANUAL_IMAGE_BASE64_LENGTH = Math.ceil(MAX_MANUAL_IMAGE_BYTES * 4 / 3) + 16;
+
+function imageUploadError(message, statusCode = 400) {
+    const error = new Error(message);
+    error.statusCode = statusCode;
+    return error;
+}
+
+function detectImageType(buffer) {
+    if (buffer.length >= 8
+        && buffer[0] === 0x89
+        && buffer.subarray(1, 8).equals(Buffer.from([0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+        return { ext: 'png', mime: 'image/png' };
+    }
+    if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+        return { ext: 'jpg', mime: 'image/jpeg' };
+    }
+    if (buffer.length >= 6) {
+        const signature = buffer.subarray(0, 6).toString('ascii');
+        if (signature === 'GIF87a' || signature === 'GIF89a') {
+            return { ext: 'gif', mime: 'image/gif' };
+        }
+    }
+    if (buffer.length >= 12
+        && buffer.subarray(0, 4).toString('ascii') === 'RIFF'
+        && buffer.subarray(8, 12).toString('ascii') === 'WEBP') {
+        return { ext: 'webp', mime: 'image/webp' };
+    }
+    if (buffer.length >= 16 && buffer.subarray(4, 8).toString('ascii') === 'ftyp') {
+        const brands = buffer.subarray(8, Math.min(buffer.length, 64)).toString('ascii');
+        if (brands.includes('avif') || brands.includes('avis')) {
+            return { ext: 'avif', mime: 'image/avif' };
+        }
+    }
+    return null;
+}
+
+function decodeManualImage(imageBase64, mimeHint) {
+    if (typeof mimeHint !== 'string' || !/^image\/[a-z0-9.+-]+$/i.test(mimeHint)) {
+        throw imageUploadError('이미지 형식 정보가 올바르지 않아요.');
+    }
+    if (typeof imageBase64 !== 'string') {
+        throw imageUploadError('이미지 데이터가 없어요.');
+    }
+
+    const encoded = imageBase64.replace(/\s+/g, '');
+    if (!encoded) throw imageUploadError('이미지 데이터가 없어요.');
+    if (encoded.length > MAX_MANUAL_IMAGE_BASE64_LENGTH) {
+        throw imageUploadError('사진은 최대 20MB까지 올릴 수 있어요.', 413);
+    }
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded) || encoded.length % 4 === 1) {
+        throw imageUploadError('이미지 데이터가 손상되었어요.');
+    }
+
+    const padded = encoded.padEnd(encoded.length + ((4 - encoded.length % 4) % 4), '=');
+    const buffer = Buffer.from(padded, 'base64');
+    if (!buffer.length) throw imageUploadError('이미지 데이터가 없어요.');
+    if (buffer.length > MAX_MANUAL_IMAGE_BYTES) {
+        throw imageUploadError('사진은 최대 20MB까지 올릴 수 있어요.', 413);
+    }
+
+    const type = detectImageType(buffer);
+    if (!type) {
+        throw imageUploadError('지원하지 않거나 손상된 사진이에요. PNG, JPG, WebP, GIF, AVIF만 지원해요.');
+    }
+    return { buffer, type };
+}
+
+function saveManualImage(imageBase64, mimeHint) {
+    const { buffer, type } = decodeManualImage(imageBase64, mimeHint);
+    fs.mkdirSync(CHATLOG_IMAGE_DIR, { recursive: true });
+    const realPublicRoot = fs.realpathSync(PUBLIC_DIR);
+    const realImageRoot = fs.realpathSync(CHATLOG_IMAGE_DIR);
+    if (!isPathInside(realPublicRoot, realImageRoot)) {
+        throw imageUploadError('챗로그 사진 폴더의 실제 경로가 올바르지 않아요.');
+    }
+    const filename = `${uid('post')}.${type.ext}`;
+    const absolutePath = path.join(realImageRoot, filename);
+    fs.writeFileSync(absolutePath, buffer, { flag: 'wx' });
+    return `/user/images/chatlog/${filename}`;
+}
 
 function isPathInside(root, candidate) {
     const relative = path.relative(root, candidate);
@@ -547,16 +644,22 @@ function resolveChatlogImage(webPath, requireExisting = false) {
     try {
         const stat = fs.statSync(abs);
         if (!stat.isFile()) return null;
+        const realPublicRoot = fs.realpathSync(PUBLIC_DIR);
         const realImageRoot = fs.realpathSync(CHATLOG_IMAGE_DIR);
         const realFile = fs.realpathSync(abs);
-        return isPathInside(realImageRoot, realFile) ? abs : null;
+        return isPathInside(realPublicRoot, realImageRoot)
+            && isPathInside(realImageRoot, realFile)
+            ? abs
+            : null;
     } catch {
         return null;
     }
 }
 
 function removeImageFile(webPath) {
-    const abs = resolveChatlogImage(webPath);
+    // 글만 있는 게시물은 삭제할 이미지 자체가 없다.
+    if (!webPath) return;
+    const abs = resolveChatlogImage(webPath, true);
     if (!abs) {
         console.warn('[chatlog] 이미지 삭제 거부 (chatlog 폴더 밖):', webPath);
         return;
@@ -914,6 +1017,16 @@ async function init(router) {
         }
     });
 
+    router.post('/image/upload', (req, res) => {
+        try {
+            const imagePath = saveManualImage(req.body?.image, req.body?.mime);
+            res.json({ ok: true, path: imagePath });
+        } catch (error) {
+            console.warn('[chatlog] 수동 이미지 업로드 거부:', error.message);
+            res.status(error.statusCode || 400).json({ error: error.message });
+        }
+    });
+
     router.post('/post', (req, res) => {
         const { roomId, text = '', image = null } = req.body || {};
         const room = db.rooms[roomId];
@@ -978,7 +1091,13 @@ async function init(router) {
             const room = db.rooms[j.roomId];
             const member = room?.members.find(m => m.avatar === j.charId);
             const post = j.postId ? findPost(j.roomId, j.postId) : null;
-            return { ...j, member, post, roomName: room?.name };
+            return {
+                ...j,
+                member,
+                post,
+                roomName: room?.name,
+                recentComments: recentRoomCommentTexts(j.roomId, j.postId),
+            };
         }));
     });
 
@@ -1020,6 +1139,13 @@ async function init(router) {
         const safeText = String(text || '').trim().slice(0, 120);
         if (!safeText || exposesInternalRoleLabel(safeText)) {
             return res.status(400).json({ error: 'invalid generated comment' });
+        }
+        if (ai.repeatsExistingComment(
+            safeText,
+            post.comments || [],
+            recentRoomCommentTexts(roomId, postId),
+        )) {
+            return res.status(409).json({ error: 'generated comment is too similar to recent comments' });
         }
         post.comments.push({
             id: uid('c'), author: charId, authorName: charName,

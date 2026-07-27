@@ -1313,18 +1313,24 @@ const COMMENT_INTENTS = {
     minimal: '말수가 적은 사람처럼 아주 짧고 특징적인 한마디만 남긴다.',
 };
 
-function commentIntentRules(intent, existingComments = []) {
+function commentIntentRules(intent, existingComments = [], recentComments = []) {
     const selected = COMMENT_INTENTS[intent] || COMMENT_INTENTS.detail;
     const existing = existingComments
         .map(item => String(item?.text || '').trim())
         .filter(Boolean)
         .slice(-8);
+    const recent = recentComments
+        .map(item => String(item?.text ?? item ?? '').trim())
+        .filter(Boolean)
+        .slice(0, 12);
     return [
         '[이번 댓글의 표현 방향]',
         `- ${selected}`,
         '- 특별히 시간 자체가 주제인 게시물이 아니면 "이 시간에", "이 새벽에", "이 저녁에", "아직 안 자", "얼른 자" 같은 시간·수면 상투어를 쓰지 않는다.',
         '- 다른 댓글의 문장 구조, 첫 단어, 질문 방식을 따라 하지 않는다.',
+        '- 단어 몇 개만 바꾸는 재작성도 금지한다. 이미 나온 핵심 소재·명령·결론의 조합 대신 사진이나 글의 다른 세부사항을 고른다.',
         existing.length ? `- 이미 사용된 댓글과 다른 관점으로 쓴다: ${existing.join(' / ')}` : '',
+        recent.length ? `- 이 방의 최근 댓글에서도 표현과 핵심 관점을 재사용하지 않는다: ${recent.join(' / ')}` : '',
     ].filter(Boolean).join('\n');
 }
 
@@ -1361,7 +1367,7 @@ async function generateComment(settings, room, post, member, options = {}) {
         characterRelation ? `\n${characterRelation}` : '',
         `\n${roomRelations}`,
         `\n${scopedRelationshipRules(settings, room, member, post)}`,
-        `\n${commentIntentRules(options.commentIntent, post.comments || [])}`,
+        `\n${commentIntentRules(options.commentIntent, post.comments || [], options.recentComments || [])}`,
         !isOtherCharacterPost && actorPersona.description
             ? `\n[현재 단톡에서 실제로 행동한 표시 페르소나]\n이름: ${personaName}\n설명: ${actorPersona.description}`
             : '',
@@ -1410,15 +1416,22 @@ async function generateComment(settings, room, post, member, options = {}) {
     });
 
     let comment = cleanGeneratedComment(raw);
-    if (exposesInternalRoleLabel(comment)) {
+    if (exposesInternalRoleLabel(comment)
+        || repeatsExistingComment(comment, post.comments || [], options.recentComments || [])) {
+        const retryReason = exposesInternalRoleLabel(comment)
+            ? '첫 답변은 내부 역할명("유저/user/페르소나/persona")을 실제 호칭처럼 써서 폐기됐다. 그 단어들을 쓰지 말고 실제 이름이나 허용된 호칭으로 완전히 다시 작성하라.'
+            : '첫 답변은 같은 게시물 또는 이 방의 최근 댓글과 문장 구조·핵심 소재·명령 방식이 겹쳐 폐기됐다. 사진이나 글의 다른 세부사항을 골라 완전히 다른 관점과 말투로 다시 작성하라.';
         const retryRaw = await callText(api, {
             system,
-            user: `${user}\n\n첫 답변은 내부 역할명("유저/user/페르소나/persona")을 실제 호칭처럼 써서 폐기됐다. 그 단어들을 쓰지 말고 실제 이름이나 허용된 호칭으로 완전히 다시 작성하라.`,
+            user: `${user}\n\n${retryReason}`,
             image: readImageAsBase64(post.image),
         });
         comment = cleanGeneratedComment(retryRaw);
     }
-    return exposesInternalRoleLabel(comment) ? '' : comment;
+    return exposesInternalRoleLabel(comment)
+        || repeatsExistingComment(comment, post.comments || [], options.recentComments || [])
+        ? ''
+        : comment;
 }
 
 // ── 캐릭터 이모지 반응 생성 ────────────────────────────────
@@ -1460,8 +1473,63 @@ function commentSimilarity(a, b) {
     return intersection / Math.max(left.size, right.size);
 }
 
-function repeatsExistingComment(comment, comments = []) {
-    return comments.some(item => commentSimilarity(comment, item?.text) >= 0.62);
+const COMMENT_MOTIFS = [
+    ['phone', /(?:휴대폰|핸드폰|스마트폰|폰|화면|스크롤)/iu],
+    ['drink', /(?:술|맥주|소주|숙취|해장|얼음물|물이나|수분|마셔|마시)/iu],
+    ['sleep', /(?:잠|자라|자냐|안\s*자|밤새|새벽|피곤)/iu],
+    ['training', /(?:훈련|운동|체육관|헬스|짐\b|라커|쿼터백|드라이브)/iu],
+    ['food', /(?:밥|먹|음식|야식|아침|점심|저녁|과일|간식)/iu],
+    ['contact', /(?:연락|전화|답장|메시지|문자)/iu],
+    ['wash', /(?:씻|샤워|세수|땀)/iu],
+    ['clothes', /(?:옷|티셔츠|바지|재킷|신발|입었|벗)/iu],
+];
+
+function commentMotifs(value) {
+    const text = String(value || '');
+    return new Set(COMMENT_MOTIFS.filter(([, pattern]) => pattern.test(text)).map(([name]) => name));
+}
+
+function commentShapes(value) {
+    const text = String(value || '');
+    const shapes = new Set();
+    if (/[?？]/u.test(text) || /(?:냐|거냐|하냐|했냐|할래)(?:\W|$)/u.test(text)) shapes.add('question');
+    if (/(?:그만|마셔|마시|자라|치워|놔라|해라|하지\s*마|말고|챙겨|씻|정신\s*차려)/u.test(text)) shapes.add('directive');
+    if (/(?:ㅋㅋ|ㅎㅎ|ㅋ|ㅎ)/u.test(text)) shapes.add('laugh');
+    return shapes;
+}
+
+function sharedSetSize(left, right) {
+    let count = 0;
+    for (const item of left) if (right.has(item)) count++;
+    return count;
+}
+
+function commentText(item) {
+    return String(item?.text ?? item ?? '').trim();
+}
+
+function repeatsExistingComment(comment, comments = [], recentComments = []) {
+    const candidate = commentText(comment);
+    if (!candidate) return false;
+    const motifs = commentMotifs(candidate);
+    const shapes = commentShapes(candidate);
+
+    const samePostDuplicate = comments.some(item => {
+        const previous = commentText(item);
+        if (!previous) return false;
+        if (commentSimilarity(candidate, previous) >= 0.56) return true;
+        return sharedSetSize(motifs, commentMotifs(previous)) >= 2;
+    });
+    if (samePostDuplicate) return true;
+
+    return recentComments.some(item => {
+        const previous = commentText(item);
+        if (!previous) return false;
+        if (commentSimilarity(candidate, previous) >= 0.62) return true;
+        const sharedMotifs = sharedSetSize(motifs, commentMotifs(previous));
+        const sharedShapes = sharedSetSize(shapes, commentShapes(previous));
+        return sharedMotifs >= 2 && sharedShapes >= 1;
+    });
 }
 
 async function generateReaction(settings, room, post, member) {
@@ -1536,7 +1604,9 @@ async function generateEngagement(settings, room, post, member, options = {}) {
         characterRelation ? `\n${characterRelation}` : '',
         `\n${relationshipGraphBlock(settings, room)}`,
         `\n${scopedRelationshipRules(settings, room, member, post)}`,
-        commentWanted ? `\n${commentIntentRules(options.commentIntent, post.comments || [])}` : '',
+        commentWanted
+            ? `\n${commentIntentRules(options.commentIntent, post.comments || [], options.recentComments || [])}`
+            : '',
         !isOtherCharacterPost && actorPersona.description
             ? `\n[현재 단톡에서 실제로 행동한 표시 페르소나]\n이름: ${actorPersona.name}\n설명: ${actorPersona.description}`
             : '',
@@ -1569,6 +1639,7 @@ async function generateEngagement(settings, room, post, member, options = {}) {
         post.text ? `글: ${post.text}` : '(글 없음)',
         postPhotoLabel(post),
         `현재 반응 작성 시각: ${timeLabel(Date.now())} (${nowTemporal.daypartKo})`,
+        commentWanted ? othersBlock(post, member) : '',
         '',
         '지정한 JSON 형식으로만 답하라.',
     ].join('\n');
@@ -1597,11 +1668,15 @@ async function generateEngagement(settings, room, post, member, options = {}) {
     const emoji = REACTION_EMOJIS.find(item => String(parsed.emoji).includes(item)) || '👍';
     let comment = commentWanted ? cleanGeneratedComment(parsed.comment) : '';
     if (commentWanted && comment
-        && (repeatsExistingComment(comment, post.comments || []) || exposesInternalRoleLabel(comment))) {
+        && (repeatsExistingComment(
+            comment,
+            post.comments || [],
+            options.recentComments || [],
+        ) || exposesInternalRoleLabel(comment))) {
         try {
             const retryReason = exposesInternalRoleLabel(comment)
                 ? '첫 후보 댓글은 내부 역할명("유저/user/페르소나/persona")을 실제 호칭처럼 써서 폐기됐다. 그 단어를 전부 빼고 실제 이름이나 허용된 호칭을 사용한다.'
-                : '첫 후보 댓글은 기존 댓글과 너무 비슷해 폐기됐다. 문장 시작·관점·질문 방식을 완전히 바꾼다.';
+                : '첫 후보 댓글은 같은 게시물 또는 이 방의 최근 댓글과 문장 구조·핵심 소재·명령 방식이 너무 비슷해 폐기됐다. 사진이나 글의 다른 세부사항을 골라 관점과 말투를 완전히 바꾼다.';
             const retryRaw = await callText(api, {
                 ...request,
                 user: `${user}\n\n${retryReason} 수정한 JSON을 한 번만 다시 출력하라.`,
@@ -1610,7 +1685,11 @@ async function generateEngagement(settings, room, post, member, options = {}) {
             if (String(retryParsed?.speakerId || '') === String(member.avatar)
                 && String(retryParsed?.targetId || '') === String(expectedTarget)) {
                 const retryComment = cleanGeneratedComment(retryParsed.comment);
-                comment = repeatsExistingComment(retryComment, post.comments || [])
+                comment = repeatsExistingComment(
+                    retryComment,
+                    post.comments || [],
+                    options.recentComments || [],
+                )
                     || exposesInternalRoleLabel(retryComment)
                     ? ''
                     : retryComment;
@@ -2070,4 +2149,5 @@ module.exports = {
     mergeRelationshipGraphs,
     relationshipGraphBlock,
     analyzeRoomRelationships,
+    repeatsExistingComment,
 };
