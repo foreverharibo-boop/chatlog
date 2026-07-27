@@ -1295,12 +1295,92 @@ function characterRelationshipBlock(room, post, member) {
 
 function postPhotoLabel(post) {
     if (!post?.image) return '(사진 없음)';
+    if (post.presenceKnown === true) {
+        const visibleNames = (post.visiblePeople || [])
+            .map(person => person?.name)
+            .filter(Boolean);
+        const visibleIds = new Set((post.visiblePeople || []).map(person => person?.id));
+        const offCameraNames = (post.presentPeople || [])
+            .filter(person => !visibleIds.has(person?.id))
+            .map(person => person?.name)
+            .filter(Boolean);
+        return [
+            '(사진 속 인물 정보는 서버가 생성 시 확정한 값이며 이미지 외형으로 다시 추측하지 말 것)',
+            `사진에 실제로 보이는 인물: ${visibleNames.length ? visibleNames.join(', ') : '없음'}`,
+            `같은 현장에 있지만 사진에는 보이지 않는 인물: ${offCameraNames.length ? offCameraNames.join(', ') : '없음'}`,
+            post.sceneContext?.locationKo
+                ? `공유 장면 장소: ${post.sceneContext.locationKo}`
+                : '',
+        ].filter(Boolean).join('\n');
+    }
     if (post.photoMode === 'everyday') return '(사람이 나오지 않는 일상 사진 첨부됨)';
     if (post.photoMode === 'selfie' && post.withPersona) {
         return `(게시자가 연결 페르소나 ${post.companionName || '동반자'}와 함께 직접 찍은 셀카 첨부됨 — 저장된 관계만 적용할 것)`;
     }
     if (post.photoMode === 'selfie') return '(게시자가 직접 찍은 셀카 첨부됨)';
     return '(사진 첨부됨 — 사진만 보고 인물 관계를 추측하지 말 것)';
+}
+
+function personIdSet(people) {
+    return new Set((people || []).map(person => String(person?.id || '')).filter(Boolean));
+}
+
+function postPresenceRules(room, post, member) {
+    const speakerId = String(member?.avatar || '');
+    if (post?.presenceKnown !== true) {
+        return [
+            '[사진 참석 여부 잠금]',
+            '- 이 사진은 수동 업로드 또는 이전 버전 게시물이라 등장 인물 ID가 확인되지 않았다.',
+            `- ${member.name}가 사진에 나왔거나 촬영 현장에 있었다고 추측하지 않는다.`,
+            '- "나 잘 나왔네", "내가 찍혔네", "우리 사진", "그때 나도 거기 있었지"처럼 자기 참석을 전제로 말하지 않는다.',
+            '- 이미지에 닮은 사람이 보여도 방 멤버나 특정 페르소나라고 단정하지 않는다.',
+        ].join('\n');
+    }
+
+    const visible = personIdSet(post.visiblePeople);
+    const present = personIdSet(post.presentPeople);
+    // 게시자는 최소한 촬영 현장에는 있었다.
+    if (String(post.author || '') === speakerId) present.add(speakerId);
+    const speakerVisible = visible.has(speakerId);
+    const speakerPresent = present.has(speakerId);
+    const visibleNames = (post.visiblePeople || []).map(person => person.name).filter(Boolean);
+    const presentNames = (post.presentPeople || []).map(person => person.name).filter(Boolean);
+    const lines = [
+        '[사진 참석 여부 잠금 — 저장된 ID가 이미지 추측보다 우선]',
+        `- 사진에 실제로 보이는 인물: ${visibleNames.length ? visibleNames.join(', ') : '없음'}`,
+        `- 현장 참석자: ${presentNames.length ? presentNames.join(', ') : '없음'}`,
+        `- 댓글 작성자 ${member.name}의 상태: ${speakerVisible
+            ? '사진에 실제로 보임'
+            : speakerPresent ? '현장에는 있었지만 사진에는 보이지 않음' : '현장에 없었고 사진에도 보이지 않음'}`,
+        '- 목록에 없는 배경 인물은 정체 불명의 일반인이다. 방 멤버나 페르소나로 추측하지 않는다.',
+    ];
+    if (!speakerVisible) {
+        lines.push(`- ${member.name}는 사진에 보이지 않으므로 자기 외모·표정·포즈·사진발을 언급하거나 "나 잘 나왔네"라고 말할 수 없다.`);
+    }
+    if (!speakerPresent) {
+        lines.push(`- ${member.name}는 현장에 없었으므로 같이 갔다거나 옆에 있었다거나 자신이 찍었다고 말할 수 없다.`);
+    } else if (!speakerVisible) {
+        lines.push(`- ${member.name}는 현장을 기억하는 말은 할 수 있지만, 사진 속 자기 모습을 묘사할 수는 없다.`);
+    }
+    return lines.join('\n');
+}
+
+function violatesPresenceClaim(comment, post, member) {
+    const text = String(comment || '').trim();
+    if (!text) return false;
+    const speakerId = String(member?.avatar || '');
+    const known = post?.presenceKnown === true;
+    const visible = personIdSet(post?.visiblePeople);
+    const present = personIdSet(post?.presentPeople);
+    if (String(post?.author || '') === speakerId) present.add(speakerId);
+    const speakerVisible = known && visible.has(speakerId);
+    const speakerPresent = known && present.has(speakerId);
+    const selfVisualClaim = /(?:(?:내가|나는|나|내\s*(?:얼굴|모습|표정|포즈))\s*(?:진짜\s*)?(?:잘\s*)?(?:나왔|찍혔|보이|예쁘|멋있|이상하)|(?:사진\s*속|저기)\s*(?:사람이\s*)?(?:나|내가)|\b(?:i\s+(?:look|came\s+out|am\s+in)|that'?s\s+me)\b)/iu;
+    const sharedPhotoClaim = /(?:(?:우리|같이)\s*(?:찍은|찍힌|나온)?\s*사진|(?:내가|우리가)\s*(?:찍었|찍은))/iu;
+    const onsiteClaim = /(?:(?:나도|내가|우리가|우리)\s*(?:거기|저기|현장|옆|같이)\s*(?:있|갔|왔|앉|먹|마셨)|(?:나도|내가)\s*(?:같이\s*)?(?:갔|있었|주문했))/iu;
+    if (!speakerVisible && selfVisualClaim.test(text)) return true;
+    if (!speakerPresent && (sharedPhotoClaim.test(text) || onsiteClaim.test(text))) return true;
+    return false;
 }
 
 const COMMENT_INTENTS = {
@@ -1367,6 +1447,7 @@ async function generateComment(settings, room, post, member, options = {}) {
         characterRelation ? `\n${characterRelation}` : '',
         `\n${roomRelations}`,
         `\n${scopedRelationshipRules(settings, room, member, post)}`,
+        `\n${postPresenceRules(room, post, member)}`,
         `\n${commentIntentRules(options.commentIntent, post.comments || [], options.recentComments || [])}`,
         !isOtherCharacterPost && actorPersona.description
             ? `\n[현재 단톡에서 실제로 행동한 표시 페르소나]\n이름: ${personaName}\n설명: ${actorPersona.description}`
@@ -1417,9 +1498,12 @@ async function generateComment(settings, room, post, member, options = {}) {
 
     let comment = cleanGeneratedComment(raw);
     if (exposesInternalRoleLabel(comment)
+        || violatesPresenceClaim(comment, post, member)
         || repeatsExistingComment(comment, post.comments || [], options.recentComments || [])) {
         const retryReason = exposesInternalRoleLabel(comment)
             ? '첫 답변은 내부 역할명("유저/user/페르소나/persona")을 실제 호칭처럼 써서 폐기됐다. 그 단어들을 쓰지 말고 실제 이름이나 허용된 호칭으로 완전히 다시 작성하라.'
+            : violatesPresenceClaim(comment, post, member)
+                ? '첫 답변은 저장된 사진 참석자 ID와 충돌했다. 사진에 보이지 않는 화자의 외모를 말하거나 현장에 없던 화자가 함께 있었다고 말하지 말고, 게시물에서 실제로 확인되는 다른 요소에 반응하라.'
             : '첫 답변은 같은 게시물 또는 이 방의 최근 댓글과 문장 구조·핵심 소재·명령 방식이 겹쳐 폐기됐다. 사진이나 글의 다른 세부사항을 골라 완전히 다른 관점과 말투로 다시 작성하라.';
         const retryRaw = await callText(api, {
             system,
@@ -1429,6 +1513,7 @@ async function generateComment(settings, room, post, member, options = {}) {
         comment = cleanGeneratedComment(retryRaw);
     }
     return exposesInternalRoleLabel(comment)
+        || violatesPresenceClaim(comment, post, member)
         || repeatsExistingComment(comment, post.comments || [], options.recentComments || [])
         ? ''
         : comment;
@@ -1552,6 +1637,7 @@ async function generateReaction(settings, room, post, member) {
         characterRelation ? `\n${characterRelation}` : '',
         `\n${relationshipGraphBlock(settings, room)}`,
         `\n${scopedRelationshipRules(settings, room, member, post)}`,
+        `\n${postPresenceRules(room, post, member)}`,
         recent ? `\n[최근 대화 분위기]\n${recent}` : '',
         isOtherCharacterPost
             ? '\n연결된 유저 페르소나와의 관계·애정·질투·소유욕을 이 게시물 작성자에게 옮기지 않는다.'
@@ -1604,6 +1690,7 @@ async function generateEngagement(settings, room, post, member, options = {}) {
         characterRelation ? `\n${characterRelation}` : '',
         `\n${relationshipGraphBlock(settings, room)}`,
         `\n${scopedRelationshipRules(settings, room, member, post)}`,
+        `\n${postPresenceRules(room, post, member)}`,
         commentWanted
             ? `\n${commentIntentRules(options.commentIntent, post.comments || [], options.recentComments || [])}`
             : '',
@@ -1672,10 +1759,13 @@ async function generateEngagement(settings, room, post, member, options = {}) {
             comment,
             post.comments || [],
             options.recentComments || [],
-        ) || exposesInternalRoleLabel(comment))) {
+        ) || exposesInternalRoleLabel(comment)
+            || violatesPresenceClaim(comment, post, member))) {
         try {
             const retryReason = exposesInternalRoleLabel(comment)
                 ? '첫 후보 댓글은 내부 역할명("유저/user/페르소나/persona")을 실제 호칭처럼 써서 폐기됐다. 그 단어를 전부 빼고 실제 이름이나 허용된 호칭을 사용한다.'
+                : violatesPresenceClaim(comment, post, member)
+                    ? '첫 후보 댓글은 저장된 사진 참석자 ID와 충돌했다. 사진에 보이지 않는 화자의 외모를 말하거나 현장에 없던 화자가 함께 있었다고 말하지 않는다.'
                 : '첫 후보 댓글은 같은 게시물 또는 이 방의 최근 댓글과 문장 구조·핵심 소재·명령 방식이 너무 비슷해 폐기됐다. 사진이나 글의 다른 세부사항을 골라 관점과 말투를 완전히 바꾼다.';
             const retryRaw = await callText(api, {
                 ...request,
@@ -1691,6 +1781,7 @@ async function generateEngagement(settings, room, post, member, options = {}) {
                     options.recentComments || [],
                 )
                     || exposesInternalRoleLabel(retryComment)
+                    || violatesPresenceClaim(retryComment, post, member)
                     ? ''
                     : retryComment;
             } else {
@@ -1719,18 +1810,62 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
     const temporal = seasonContext(slotAt);
     const photoMode = decision.photoMode === 'selfie' ? 'selfie' : 'everyday';
     const everydayPhoto = photoMode === 'everyday';
+    const sharedScene = decision.sharedScene || null;
+    const sharedSceneActive = !!sharedScene?.id
+        && Array.isArray(sharedScene.participantIds)
+        && sharedScene.participantIds.includes(member.avatar);
+    const roomCompanionReferences = sharedSceneActive && !everydayPhoto
+        ? (decision.sharedVisibleMemberIds || [])
+            .filter(avatar => avatar !== member.avatar
+                && sharedScene.participantIds.includes(avatar))
+            .slice(0, 2)
+            .map(avatar => {
+                const companion = room.members.find(candidate => candidate.avatar === avatar);
+                const image = companion ? readAvatar(settings, companion.avatar) : null;
+                return companion && image?.data ? { companion, image } : null;
+            })
+            .filter(Boolean)
+        : [];
+    const visibleRoomMembers = roomCompanionReferences.map(item => item.companion);
     let personaReference = null;
-    if (!everydayPhoto && persona?.avatar && relationAllowsCompanion(room, member, persona)) {
+    if (!sharedSceneActive
+        && !everydayPhoto
+        && persona?.avatar
+        && relationAllowsCompanion(room, member, persona)) {
         personaReference = readPersonaAvatar(settings, persona.avatar);
     }
     const companionDecision = chooseCompanionSelfie({
         photoMode,
-        eligible: !!personaReference?.data,
+        eligible: !sharedSceneActive && !!personaReference?.data,
         chance: settings.partnerSelfieChance ?? 45,
         roll: decision.companionRoll ?? 50,
         recentCompanionFlags: decision.recentCompanionFlags || [],
     });
     const companionSelfie = companionDecision.includePersona;
+    const roomCompanionSelfie = sharedSceneActive && visibleRoomMembers.length > 0;
+    const roomCompanionNames = visibleRoomMembers.map(companion => companion.name);
+    const sharedPreviousViews = (sharedScene?.posts || [])
+        .map(post => `${post.authorName}: ${post.photoMode} / ${post.viewpoint || '관점 미상'}`)
+        .slice(-4);
+    const sharedSceneRule = sharedSceneActive
+        ? [
+            '[이번 시간대 공동 장면 — 참석자 모두에게 동일한 사실]',
+            `- SCENE_ID=${sharedScene.id}`,
+            `- 장소: ${sharedScene.locationEn} (${sharedScene.locationKo})`,
+            `- 현장 참석자: ${sharedScene.participantNames.join(', ')}`,
+            `- 모든 참석자 게시물에서 유지할 배경 기준: ${sharedScene.anchorEn}`,
+            sharedScene.continuity
+                ? `- 먼저 생성된 게시물이 확정한 연속성: ${sharedScene.continuity}`
+                : '- 아직 먼저 생성된 게시물이 없다. 위 장소와 배경 기준을 구체화해 continuity에 기록한다.',
+            sharedPreviousViews.length
+                ? `- 이미 올라온 같은 장면의 관점과 겹치지 않게 한다: ${sharedPreviousViews.join(' / ')}`
+                : '- 이 장면에서 첫 게시물이다.',
+            '- 다른 장소나 다른 약속으로 바꾸지 않는다.',
+            '- 같은 장소·조명·공유 사물은 유지하되, 게시자 성격에 맞춰 다른 구도와 다른 피사체를 고른다.',
+            '- continuity에는 다음 게시물도 그대로 재사용할 장소 배치·조명·공유 사물만 영어 300자 이내로 적는다.',
+            '- viewpoint에는 이번 사진만의 구도와 주 피사체를 영어 120자 이내로 적는다.',
+        ].filter(Boolean).join('\n')
+        : '';
     const photoModeRule = everydayPhoto
         ? [
             '[이번 게시물의 사진 유형 — 일상 사진]',
@@ -1739,6 +1874,26 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
             '- 셀카, 얼굴, 손을 제외한 신체, 거울 속 사람, 배경 행인처럼 식별 가능한 사람을 넣지 않는다.',
             '- personaVisible은 반드시 false, personaVisualIdentity와 visualIdentity는 빈 문자열로 둔다.',
         ].join('\n')
+        : roomCompanionSelfie
+            ? [
+                '[이번 게시물의 사진 유형 — 같은 방 캐릭터 동반 셀카]',
+                `- 게시 캐릭터(${member.name})가 직접 찍은 셀카에 ${roomCompanionNames.join(', ')}도 함께 보여야 한다.`,
+                `- 사진에 보이는 사람은 정확히 ${[member.name, ...roomCompanionNames].join(', ')}이며 서로 다른 사람으로 구분한다.`,
+                '- 첨부되는 각 프사를 해당 인물의 유일한 얼굴 기준으로 사용한다.',
+                '- 현장에 있어도 위 목록에 없는 참석자는 이번 사진 프레임 밖에 둔다.',
+                '- 제3자가 찍은 사진, 삼각대, 영화 스틸 구도는 금지한다.',
+                '- personaVisible은 false이며 연결 페르소나는 이번 사진에 넣지 않는다.',
+            ].join('\n')
+            : sharedSceneActive
+                ? [
+                    '[이번 게시물의 사진 유형 — 공동 장면 속 혼자 셀카]',
+                    `- 게시 캐릭터(${member.name})가 공동 장소에서 직접 찍은 셀카다.`,
+                    `- 현장에는 ${sharedScene.participantNames.join(', ')}가 있지만 이번 사진에 보이는 인물은 ${member.name} 한 명뿐이다.`,
+                    '- 다른 참석자와 정체를 알 수 있는 배경 인물을 프레임에 넣지 않는다.',
+                    '- 연결 페르소나도 이번 사진에 넣지 않는다.',
+                    '- 제3자가 찍은 사진, 삼각대, 영화 스틸 구도는 금지한다.',
+                    '- personaVisible은 false다.',
+                ].join('\n')
         : companionSelfie
             ? [
                 '[이번 게시물의 사진 유형 — 연결 페르소나 동반 셀카]',
@@ -1784,7 +1939,7 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
         '- 캐릭터 카드에 없는 신체 상태·직업·가족관계를 캐릭터 본인에게 새로 부여하지 마라.',
         '',
         'JSON만 출력한다. 마크다운 코드펜스 금지.',
-        '{"post": true 또는 false, "caption": "캐릭터 시점의 25자 이내 SNS 캡션", "scene": "사진 장면을 영어로 묘사", "visualIdentity": "게시 캐릭터의 눈에 보이는 외형만 영어 200자 이내", "personaVisible": true 또는 false, "personaVisualIdentity": "페르소나가 보일 때 페르소나의 눈에 보이는 외형만 영어 200자 이내", "roleCheck": "캐릭터와 유저가 각각 무엇을 하는지 짧게 확인"}',
+        '{"post": true 또는 false, "caption": "캐릭터 시점의 25자 이내 SNS 캡션", "scene": "사진 장면을 영어로 묘사", "continuity": "같은 장면의 다음 게시물도 유지할 장소·조명·공유 사물을 영어 300자 이내", "viewpoint": "이번 사진의 고유 구도와 주 피사체를 영어 120자 이내", "visualIdentity": "게시 캐릭터의 눈에 보이는 외형만 영어 200자 이내", "personaVisible": true 또는 false, "personaVisualIdentity": "페르소나가 보일 때 페르소나의 눈에 보이는 외형만 영어 200자 이내", "roleCheck": "각 인물이 무엇을 하는지 짧게 확인"}',
         '',
         '게시 여부 규칙:',
         forcePost
@@ -1806,6 +1961,8 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
         `- personaVisible이 true면 personaVisualIdentity에는 유저 페르소나 설명에서 확인되는 외형과 계절에 맞는 현재 옷차림만 쓴다. 캐릭터(${member.name})의 외형과 섞지 마라.`,
         '- personaVisible이 false면 personaVisualIdentity는 빈 문자열로 둔다.',
         '',
+        sharedSceneRule,
+        sharedSceneRule ? '' : '',
         photoModeRule,
         '',
         'post가 true일 때 scene 규칙:',
@@ -1828,9 +1985,15 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
     const user = [
         `현재 날짜와 시각은 ${temporal.label}, ${timeLabel(slotAt)}이다.`,
         `이번 랜덤 게시 충동은 ${decision.randomRoll ?? 50}/99이다.`,
-        `이번 사진 유형은 ${everydayPhoto ? '사람 없는 일상 사진' : companionSelfie ? `연결 페르소나 ${personaName}와 함께 찍는 셀카` : '혼자 찍는 셀카'}로 이미 결정됐다. 다른 유형으로 바꾸지 마라.`,
+        `이번 사진 유형은 ${everydayPhoto
+            ? sharedSceneActive ? `공동 장면(${sharedScene.locationKo})의 사람 없는 일상 사진` : '사람 없는 일상 사진'
+            : roomCompanionSelfie
+                ? `같은 방 캐릭터 ${roomCompanionNames.join(', ')}와 함께 찍는 셀카`
+                : sharedSceneActive
+                    ? `공동 장면(${sharedScene.locationKo})에서 혼자 찍는 셀카`
+                    : companionSelfie ? `연결 페르소나 ${personaName}와 함께 찍는 셀카` : '혼자 찍는 셀카'}로 이미 결정됐다. 다른 유형으로 바꾸지 마라.`,
         `설정한 셀카 기본 비율은 ${decision.baseSelfieChance ?? 50}%이며 캐릭터 카드 보정 후 ${decision.selfieChance ?? 50}%다.${decision.forcedOpposite ? ` 설정 비율에 따른 같은 유형 연속 한도 ${decision.streakLimit}회에 도달해 이번에는 반대 유형으로 강제됐다. 반드시 강제된 유형을 지킨다.` : ''}`,
-        !everydayPhoto
+        !everydayPhoto && !sharedSceneActive
             ? `셀카 중 연결 페르소나 동반 설정은 ${companionDecision.chance}%다.${companionDecision.forcedOpposite ? ` 설정 비율에 따른 ${companionDecision.forcedFrom ? '동반' : '혼자'} 셀카 연속 한도 ${companionDecision.streakLimit}회에 도달해 이번에는 반대 구성으로 강제됐다.` : ''}`
             : '',
         `활동 시간 기준 마지막 게시 후 약 ${Number(decision.activeHoursSinceLastPost || 0).toFixed(1)}시간 지났다.`,
@@ -1858,6 +2021,48 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
         console.warn('[chatlog] scene 파싱 실패, 원문:', String(raw).slice(0, 200));
     }
 
+    const characterPerson = {
+        kind: 'character',
+        id: member.avatar,
+        name: member.name,
+        avatar: member.avatar,
+    };
+    const sceneParticipantPeople = sharedSceneActive
+        ? sharedScene.participantIds
+            .map(avatar => room.members.find(candidate => candidate.avatar === avatar))
+            .filter(Boolean)
+            .map(candidate => ({
+                kind: 'character',
+                id: candidate.avatar,
+                name: candidate.name,
+                avatar: candidate.avatar,
+            }))
+        : [];
+    const visibleRoomPeople = visibleRoomMembers.map(candidate => ({
+        kind: 'character',
+        id: candidate.avatar,
+        name: candidate.name,
+        avatar: candidate.avatar,
+    }));
+    const personaPerson = companionSelfie
+        ? {
+            kind: 'persona',
+            id: `persona:${String(persona.avatar || personaName).trim()}`,
+            name: personaName,
+            avatar: persona.avatar || null,
+        }
+        : null;
+    const presentPeople = sharedSceneActive
+        ? sceneParticipantPeople
+        : [characterPerson, ...(personaPerson ? [personaPerson] : [])];
+    const visiblePeople = everydayPhoto
+        ? []
+        : [
+            characterPerson,
+            ...visibleRoomPeople,
+            ...(personaPerson ? [personaPerson] : []),
+        ];
+
     let image = null;
     if (parsed.scene) {
         try {
@@ -1868,16 +2073,52 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
                     name: member.name,
                     image: readAvatar(settings, member.avatar),
                 }];
-            if (companionSelfie) {
+            if (roomCompanionSelfie) {
+                for (const item of roomCompanionReferences) {
+                    references.push({
+                        role: 'room character',
+                        name: item.companion.name,
+                        image: item.image,
+                    });
+                }
+            } else if (companionSelfie) {
                 references.push({
                     role: 'user persona',
                     name: personaName,
                     image: personaReference,
                 });
             }
-            const scene = companionSelfie
-                ? `${parsed.scene}. Both ${member.name} and ${personaName} must be visibly present as two separate people in the selfie.`
-                : parsed.scene;
+            const sceneParts = [];
+            if (sharedSceneActive) {
+                sceneParts.push(
+                    `This is the same shared scene at ${sharedScene.locationEn}.`,
+                    `Keep this fixed background and spatial anchor: ${sharedScene.anchorEn}.`,
+                    sharedScene.continuity
+                        ? `Match this already established continuity exactly: ${sharedScene.continuity}.`
+                        : '',
+                );
+            }
+            sceneParts.push(parsed.scene);
+            if (roomCompanionSelfie) {
+                sceneParts.push(
+                    `The visible people are exactly ${[member.name, ...roomCompanionNames].join(', ')} as separate people.`,
+                    'Every other attendee remains outside the frame.',
+                );
+            } else if (companionSelfie) {
+                sceneParts.push(
+                    `Both ${member.name} and ${personaName} must be visibly present as two separate people in the selfie.`,
+                );
+            } else if (!everydayPhoto) {
+                sceneParts.push(`Only ${member.name} is visible in the selfie.`);
+            }
+            const scene = sceneParts.filter(Boolean).join(' ');
+            const identityEntities = everydayPhoto
+                ? []
+                : [
+                    member,
+                    ...visibleRoomMembers,
+                    ...(companionSelfie ? [persona] : []),
+                ];
             image = await generateImage(
                 settings,
                 scene,
@@ -1888,6 +2129,7 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
                 companionSelfie ? parsed.personaVisualIdentity : '',
                 `${temporal.label} (${temporal.seasonEn}), ${timeLabel(slotAt)}, ${temporal.daypartEn}. ${temporal.lightingEn}`,
                 photoMode,
+                identityEntities,
             );
         } catch (e) {
             console.error('[chatlog] 이미지 생성 실패:', e.message);
@@ -1903,6 +2145,16 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
         photoMode,
         withPersona: companionSelfie,
         companionName: companionSelfie ? personaName : null,
+        sceneContinuity: sharedSceneActive
+            ? String(parsed.continuity
+                || sharedScene.continuity
+                || `${sharedScene.locationEn}; ${sharedScene.anchorEn}`).slice(0, 500)
+            : '',
+        sceneViewpoint: sharedSceneActive
+            ? String(parsed.viewpoint || parsed.scene || '').slice(0, 160)
+            : '',
+        presentPeople,
+        visiblePeople,
     };
 }
 
@@ -1997,13 +2249,16 @@ function identityNameVariants(name) {
     ].filter(Boolean))].sort((a, b) => b.length - a.length);
 }
 
-function neutralizeIdentityNames(scene, member, persona) {
+function neutralizeIdentityNames(scene, member, persona, identityEntities = []) {
     let neutral = String(scene || '');
-    for (const name of identityNameVariants(member?.name)) {
-        neutral = replaceLiteralIgnoreCase(neutral, name, 'Person A');
-    }
-    for (const name of identityNameVariants(persona?.name)) {
-        neutral = replaceLiteralIgnoreCase(neutral, name, 'Person B');
+    const entities = identityEntities.length
+        ? identityEntities
+        : [member, persona].filter(Boolean);
+    for (const [index, entity] of entities.entries()) {
+        const label = `Person ${String.fromCharCode(65 + index)}`;
+        for (const name of identityNameVariants(entity?.name)) {
+            neutral = replaceLiteralIgnoreCase(neutral, name, label);
+        }
     }
     return neutral;
 }
@@ -2018,13 +2273,13 @@ async function generateImage(
     personaVisualIdentity = '',
     temporalContext = '',
     photoMode = 'selfie',
+    identityEntities = [],
 ) {
     const imageApi = resolveImageApi(settings);
 
     const usableReferences = normalizeReferences(references);
     const everydayPhoto = photoMode === 'everyday';
-    const hasCompanionReference = usableReferences
-        .some(reference => reference.role === 'user persona');
+    const hasCompanionReference = usableReferences.length > 1;
     if (!everydayPhoto
         && !usableReferences.some(reference => reference.role === 'posting character')) {
         throw new Error('게시 캐릭터 참조 프사가 없어 인물 사진 생성을 건너뜀');
@@ -2032,7 +2287,19 @@ async function generateImage(
     // 인물 이름이 유명 캐릭터·배우의 학습 외형을 불러오지 않도록 실제 이미지
     // 요청에서는 이름을 중립 라벨로 바꾼다. 얼굴·머리·나이·체격은 첨부 프사만
     // 기준으로 하며, 텍스트 모델이 만든 visualIdentity는 장면 판단에만 사용한다.
-    const neutralScene = neutralizeIdentityNames(scene, member, persona);
+    const neutralScene = neutralizeIdentityNames(
+        scene,
+        member,
+        persona,
+        identityEntities,
+    );
+    const companionIdentityLocks = usableReferences.slice(1)
+        .map((reference, offset) => {
+            const personLabel = `Person ${String.fromCharCode(66 + offset)}`;
+            return `${personLabel} must be the exact separate person shown in Reference image ${offset + 2}. Reference image ${offset + 2} is the sole visual identity source for ${personLabel}.`;
+        });
+    const allReferenceLabels = usableReferences
+        .map((_, index) => `Person ${String.fromCharCode(65 + index)}`);
     const identityRule = everydayPhoto
         ? 'The photographer and every other person must remain completely out of frame. Do not generate a face, body, reflection, selfie, portrait, crowd, or identifiable bystander.'
         : [
@@ -2042,16 +2309,16 @@ async function generateImage(
             'Ignore every visual association learned from character names, fictional canon, books, films, television, actors, celebrities, franchises, adaptations or fandom artwork.',
             'Do not render a canonical version, screen adaptation, actor, celebrity, lookalike or alternate interpretation of Person A.',
             'Names in the scene are role labels only and have been intentionally replaced with neutral labels. Never use a name to decide appearance.',
+            ...companionIdentityLocks,
             hasCompanionReference
-                ? 'Person B must be the exact separate person shown in Reference image 2. Reference image 2 is the sole visual identity source for Person B.'
-                : '',
-            hasCompanionReference
-                ? 'Never merge Person A and Person B, exchange their faces, or transfer one person’s appearance to the other.'
+                ? `Never merge ${allReferenceLabels.join(', ')}, exchange their faces, or transfer one person’s appearance to another.`
                 : '',
         ].filter(Boolean).join(' ');
     const cameraRule = everydayPhoto
         ? 'Create a first-person rear-camera phone snapshot of ordinary daily life: scenery, sky, food, drink, desk, hobby equipment, belongings, room, street, night view, or a pet. No people or human reflections may appear.'
-        : 'Make it a believable front-facing smartphone selfie, arm’s-length selfie, or mirror selfie taken by the posting character, who must be visible in frame. Multiple people must appear together in a group selfie. Never use a third-person, candid observer, tripod, surveillance, cinematic, or someone-else-took-it angle.';
+        : hasCompanionReference
+            ? `Make it a believable front-facing smartphone selfie, arm’s-length selfie, or mirror selfie taken by Person A. Exactly ${allReferenceLabels.join(', ')} must be visible together as distinct people. Never add an unreferenced identifiable person or use a third-person camera.`
+            : 'Make it a believable front-facing smartphone selfie, arm’s-length selfie, or mirror selfie taken by Person A. Only Person A may be visible. Never use a third-person, candid observer, tripod, surveillance, cinematic, or someone-else-took-it angle.';
     const seasonRule = temporalContext
         ? `Calendar context: ${temporalContext}. Match clothing, daylight, vegetation and surroundings to this date, season and time. Do not invent rain, snow or extreme weather from the season alone. If the described location has a different climate or the scene is indoors, follow the actual location and environment instead.`
         : '';
@@ -2067,7 +2334,7 @@ async function generateImage(
             'IDENTITY IS MORE IMPORTANT THAN STYLE OR CANON.',
             'Person A must match Reference image 1 exactly and must not resemble any actor, celebrity, official adaptation or famous fictional-character depiction.',
             hasCompanionReference
-                ? 'Person B must separately match Reference image 2 exactly; keep both faces distinct.'
+                ? `${companionIdentityLocks.join(' ')} Keep every referenced face distinct.`
                 : 'Only Person A may be visible.',
             cameraRule,
             seasonRule,
@@ -2150,4 +2417,6 @@ module.exports = {
     relationshipGraphBlock,
     analyzeRoomRelationships,
     repeatsExistingComment,
+    postPresenceRules,
+    violatesPresenceClaim,
 };

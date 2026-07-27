@@ -56,6 +56,8 @@ let settings = {
     userPersonaName: '',    // 유저 페르소나 이름 (클라이언트가 동기화)
     selfiePhotoChance: 50,  // 전체 사진 중 셀카 기본 비율
     partnerSelfieChance: 45, // 셀카 중 연결 페르소나 동반 비율
+    roomMeetupChance: 28,   // 슬롯마다 같은 방 캐릭터 공동 장면을 만들 확률
+    sharedScenePostChance: 55, // 공동 장면의 추가 참석자가 자기 시점 게시를 시도할 확률
     commentDelayMinMin: 1,
     commentDelayMaxMin: 30,
     characterCommentChance: 30, // 다른 캐릭터 게시물에 댓글도 남길 확률
@@ -110,6 +112,10 @@ function loadAll() {
 
     for (const room of Object.values(db.rooms)) {
         room.slotHistory ??= [];
+        room.sharedScenes ??= [];
+        room.sharedScenes = room.sharedScenes
+            .filter(scene => scene && Number(scene.slotAt) > Date.now() - 7 * 24 * 3600 * 1000)
+            .slice(-120);
         room.memberPersonas ??= {};
         room.relationshipGraph ??= {
             version: 2,
@@ -143,6 +149,9 @@ function loadAll() {
         for (const post of posts) {
             post.comments ??= [];
             post.reactions ??= [];
+            post.presentPeople ??= [];
+            post.visiblePeople ??= [];
+            post.presenceKnown ??= false;
             if (post.author !== 'user') {
                 const member = room?.members?.find(m => m.avatar === post.author);
                 post.authorName = cleanDisplayName(member?.name || post.authorName || post.author);
@@ -225,6 +234,44 @@ function statusPayload() {
 const uid = (p) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 const rand = (min, max) => min + Math.random() * (max - min);
 const COMMENT_INTENTS = ['detail', 'tease', 'question', 'opinion', 'practical', 'callback', 'minimal'];
+const SHARED_SCENE_TEMPLATES = [
+    {
+        type: 'cafe',
+        locationKo: '동네 카페',
+        locationEn: 'the same cozy neighborhood cafe',
+        anchorEn: 'the same table, window direction, cups, tabletop material, interior palette and daylight',
+    },
+    {
+        type: 'meal',
+        locationKo: '식당',
+        locationEn: 'the same casual restaurant',
+        anchorEn: 'the same table, dishes, seating arrangement, wall colors and ambient lighting',
+    },
+    {
+        type: 'park',
+        locationKo: '공원',
+        locationEn: 'the same nearby park',
+        anchorEn: 'the same path, benches, trees, sky, weather and direction of sunlight',
+    },
+    {
+        type: 'shopping',
+        locationKo: '상점가',
+        locationEn: 'the same shopping street',
+        anchorEn: 'the same storefronts, bags, pavement, crowd level and natural light',
+    },
+    {
+        type: 'workout',
+        locationKo: '운동 공간',
+        locationEn: 'the same gym or practice space',
+        anchorEn: 'the same equipment, lockers, floor, windows and overhead lighting',
+    },
+    {
+        type: 'hangout',
+        locationKo: '편하게 모인 실내 공간',
+        locationEn: 'the same relaxed indoor hangout space',
+        anchorEn: 'the same sofa or table, room layout, shared objects, window light and lamps',
+    },
+];
 
 function shuffled(values) {
     const copy = [...values];
@@ -233,6 +280,147 @@ function shuffled(values) {
         [copy[index], copy[target]] = [copy[target], copy[index]];
     }
     return copy;
+}
+
+function clampPercent(value, fallback = 0) {
+    const number = Number(value);
+    return Math.max(0, Math.min(100, Number.isFinite(number) ? number : fallback));
+}
+
+function exactCharacterRelation(room, aAvatar, bAvatar) {
+    return (room.relationshipGraph?.characterRelations || []).find(relation =>
+        ['explicit', 'manual'].includes(relation?.confidence)
+        && ((relation.aAvatar === aAvatar && relation.bAvatar === bAvatar)
+            || (relation.aAvatar === bAvatar && relation.bAvatar === aAvatar))) || null;
+}
+
+function relationMeetupWeight(room, aAvatar, bAvatar) {
+    const relation = exactCharacterRelation(room, aAvatar, bAvatar);
+    if (!relation) return 26;
+    return {
+        spouse: 100,
+        romantic: 96,
+        close_friend: 92,
+        family: 86,
+        friend: 78,
+        colleague: 58,
+        custom: 62,
+        acquaintance: 42,
+        rival: 28,
+        ex: 22,
+        hostile: 4,
+        unknown: 24,
+    }[relation.type] ?? 30;
+}
+
+function memberSocialWeight(member) {
+    const card = `${member?.personality || ''} ${member?.description || ''}`.toLowerCase();
+    let weight = 50;
+    if (/(?:사교|외향|활발|친화|장난|파티|social|outgoing|extrovert|friendly|playful)/iu.test(card)) weight += 24;
+    if (/(?:내향|과묵|무뚝뚝|고독|사적|바쁨|introvert|reserved|private|solitary|busy)/iu.test(card)) weight -= 18;
+    return Math.max(12, weight);
+}
+
+function weightedPick(items, weightOf) {
+    if (!items.length) return null;
+    const weighted = items.map(item => ({
+        item,
+        weight: Math.max(0, Number(weightOf(item)) || 0),
+    }));
+    const total = weighted.reduce((sum, entry) => sum + entry.weight, 0);
+    if (total <= 0) return items[Math.floor(Math.random() * items.length)];
+    let roll = Math.random() * total;
+    for (const entry of weighted) {
+        roll -= entry.weight;
+        if (roll <= 0) return entry.item;
+    }
+    return weighted.at(-1).item;
+}
+
+function createSharedScenePlan(room, slotAt, candidates = room.members || []) {
+    if (candidates.length < 2
+        || Math.random() * 100 >= clampPercent(settings.roomMeetupChance, 28)) {
+        return null;
+    }
+
+    const lead = weightedPick(candidates, member => memberSocialWeight(member));
+    if (!lead) return null;
+    const participantCount = Math.min(
+        candidates.length,
+        Math.random() < 0.36 ? 3 : 2,
+    );
+    const participants = [lead];
+    const remaining = candidates.filter(member => member.avatar !== lead.avatar);
+    while (participants.length < participantCount && remaining.length) {
+        const next = weightedPick(remaining, member =>
+            relationMeetupWeight(room, lead.avatar, member.avatar)
+            + Math.round(memberSocialWeight(member) * 0.25));
+        if (!next) break;
+        participants.push(next);
+        remaining.splice(remaining.findIndex(member => member.avatar === next.avatar), 1);
+    }
+    if (participants.length < 2) return null;
+
+    const template = SHARED_SCENE_TEMPLATES[
+        Math.floor(Math.random() * SHARED_SCENE_TEMPLATES.length)
+    ];
+    const scene = {
+        id: uid('scene'),
+        slotAt,
+        leadAvatar: lead.avatar,
+        participantIds: participants.map(member => member.avatar),
+        participantNames: participants.map(member => member.name),
+        type: template.type,
+        locationKo: template.locationKo,
+        locationEn: template.locationEn,
+        anchorEn: template.anchorEn,
+        continuity: '',
+        posts: [],
+        createdAt: Date.now(),
+        expiresAt: slotAt + 2 * 3600 * 1000,
+    };
+    room.sharedScenes ??= [];
+    room.sharedScenes.push(scene);
+    if (room.sharedScenes.length > 120) {
+        room.sharedScenes.splice(0, room.sharedScenes.length - 120);
+    }
+    return scene;
+}
+
+function findSharedScene(room, sceneId) {
+    if (!sceneId) return null;
+    return (room.sharedScenes || []).find(scene => scene.id === sceneId) || null;
+}
+
+function sharedSceneDisplayAt(scene) {
+    const scheduled = new Date(Number(scene?.slotAt) || Date.now());
+    const hourStart = new Date(scheduled);
+    hourStart.setMinutes(0, 0, 0);
+    const firstMinute = Math.min(50, Math.max(0, scheduled.getMinutes()));
+    const postIndex = Math.max(0, Number(scene?.posts?.length || 0));
+    const minute = Math.min(58, firstMinute + postIndex * 6);
+    return hourStart.getTime() + minute * 60 * 1000;
+}
+
+function sharedScenePeople(room, scene) {
+    return (scene?.participantIds || [])
+        .map(avatar => room.members.find(member => member.avatar === avatar))
+        .filter(Boolean)
+        .map(member => ({
+            kind: 'character',
+            id: member.avatar,
+            name: member.name,
+            avatar: member.avatar,
+        }));
+}
+
+function chooseVisibleSceneCompanions(scene, member) {
+    const candidates = shuffled(
+        (scene?.participantIds || []).filter(avatar => avatar !== member.avatar),
+    );
+    if (!candidates.length || Math.random() >= 0.68) return [];
+    const count = candidates.length > 1 && Math.random() < 0.32 ? 2 : 1;
+    return candidates.slice(0, count);
 }
 
 function spreadTimes(startAt, count, windowMinutes = 48) {
@@ -441,7 +629,12 @@ async function runJob(job) {
     if (job.type === 'cut') {
         const member = findMember(room, job.charId);
         if (!member) return;
-        const effectiveSlotAt = Date.now();
+        const sharedScene = findSharedScene(room, job.sharedSceneId);
+        // 공동 장면의 여러 시점은 실제 생성이 조금 늦어져도 같은 시간 탭에 묶는다.
+        // 분 단위는 6분씩 벌려 동시에 도배된 것처럼 보이지 않게 한다.
+        const effectiveSlotAt = sharedScene
+            ? sharedSceneDisplayAt(sharedScene)
+            : Date.now();
         if (hasCharacterPostInSlot(room.id, member.avatar, effectiveSlotAt)) {
             return { status: 'duplicate-skipped' };
         }
@@ -468,11 +661,16 @@ async function runJob(job) {
             recentPhotoModes,
             settings.selfiePhotoChance ?? 50,
         );
+        const sharedVisibleMemberIds = sharedScene && photoDecision.photoMode === 'selfie'
+            ? chooseVisibleSceneCompanions(sharedScene, member)
+            : [];
         const result = await ai.generateCharacterCut(settings, room, member, effectiveSlotAt, {
             forcePost,
             randomRoll: Math.floor(rand(0, 100)),
             companionRoll: Math.floor(rand(0, 100)),
             recentCompanionFlags,
+            sharedScene,
+            sharedVisibleMemberIds,
             activeHoursSinceLastPost: activeHoursBetween(lastPostAt, effectiveSlotAt, room.schedule),
             maxSilenceHours,
             ...photoDecision,
@@ -487,13 +685,46 @@ async function runJob(job) {
             photoMode,
             withPersona = false,
             companionName = null,
+            sceneContinuity = '',
+            sceneViewpoint = '',
+            presentPeople = [],
+            visiblePeople = [],
         } = result;
+        if (sharedScene) {
+            if (!sharedScene.continuity && sceneContinuity) {
+                sharedScene.continuity = String(sceneContinuity).slice(0, 500);
+            }
+            sharedScene.posts ??= [];
+            sharedScene.posts.push({
+                author: member.avatar,
+                authorName: member.name,
+                photoMode,
+                viewpoint: String(sceneViewpoint || '').slice(0, 160),
+                createdAt: Date.now(),
+            });
+        }
+        const normalizedPresentPeople = presentPeople.length
+            ? presentPeople
+            : sharedScene ? sharedScenePeople(room, sharedScene) : [];
         const post = {
             id: uid('post'), roomId: room.id, author: job.charId,
             authorName: member.name,
             slotAt: effectiveSlotAt, createdAt: Date.now(),
             text, image, imageSource: 'generated', photoMode,
             withPersona, companionName,
+            sceneId: sharedScene?.id || null,
+            sceneContext: sharedScene
+                ? {
+                    type: sharedScene.type,
+                    locationKo: sharedScene.locationKo,
+                    locationEn: sharedScene.locationEn,
+                    anchorEn: sharedScene.anchorEn,
+                    continuity: sharedScene.continuity || sceneContinuity || '',
+                }
+                : null,
+            presenceKnown: true,
+            presentPeople: normalizedPresentPeople,
+            visiblePeople,
             read: false, comments: [], reactions: [],
         };
         (db.posts[room.id] ??= []).push(post);
@@ -693,6 +924,9 @@ function runCleanup() {
         const before = (room.slotHistory || []).length;
         room.slotHistory = (room.slotHistory || []).filter(ts => ts >= cutoffTs);
         removedSlots += before - room.slotHistory.length;
+        room.sharedScenes = (room.sharedScenes || [])
+            .filter(scene => Number(scene?.slotAt || 0) >= cutoffTs)
+            .slice(-120);
     }
 
     // 하루로그 내보내기 파일도 같이 정리
@@ -787,15 +1021,26 @@ async function tick() {
 
             const slotAt = room.nextSlotAt;
             recordSlot(room, slotAt);
-            const eligible = shuffled(room.members.filter(member =>
+            const candidates = room.members.filter(member =>
                 !hasCharacterPostInSlot(room.id, member.avatar, slotAt)
-                && !hasQueuedCharacterCut(room.id, member.avatar, slotAt)));
+                && !hasQueuedCharacterCut(room.id, member.avatar, slotAt));
+            const sharedScene = createSharedScenePlan(room, slotAt, candidates);
+            const followupChance = clampPercent(settings.sharedScenePostChance, 55);
+            const eligible = shuffled(candidates.filter(member => {
+                if (!sharedScene?.participantIds.includes(member.avatar)) return true;
+                if (member.avatar === sharedScene.leadAvatar) return true;
+                // 같은 자리에 있으면서도 모두가 게시하지는 않는다.
+                return Math.random() * 100 < followupChance;
+            }));
             const intervalMinutes = Math.max(60, Number(room.schedule?.cutIntervalHours || 2) * 60);
             const spreadMinutes = Math.min(55, Math.max(18, intervalMinutes * 0.55));
             const runTimes = spreadTimes(slotAt, eligible.length, spreadMinutes);
             for (const [index, member] of eligible.entries()) {
                 db.jobs.push({
                     id: uid('job'), type: 'cut', roomId: room.id, charId: member.avatar, slotAt,
+                    sharedSceneId: sharedScene?.participantIds.includes(member.avatar)
+                        ? sharedScene.id
+                        : null,
                     attempts: 0,
                     runAt: runTimes[index],
                 });
@@ -871,6 +1116,7 @@ async function init(router) {
             id: uid('room'), name, members: normalizedMembers, persona, memberPersonas,
             createdAt: Date.now(), paused: false,
             slotHistory: [],
+            sharedScenes: [],
             relationshipGraph: {
                 version: 2,
                 status: 'ready',
@@ -1045,6 +1291,8 @@ async function init(router) {
             authorName: room.persona?.name || settings.userPersonaName || null,
             slotAt: Date.now(), createdAt: Date.now(),
             text, image: safeImage, imageSource: 'upload',
+            sceneId: null, sceneContext: null,
+            presenceKnown: false, presentPeople: [], visiblePeople: [],
             read: true, comments: [], reactions: [],
         };
         (db.posts[roomId] ??= []).push(post);
@@ -1122,6 +1370,7 @@ async function init(router) {
             commentIntent: source.commentIntent,
             slotAt: source.slotAt,
             forcePost: source.forcePost,
+            sharedSceneId: source.sharedSceneId || null,
             attempts,
             runAt: retryAt,
         };
@@ -1146,6 +1395,11 @@ async function init(router) {
             recentRoomCommentTexts(roomId, postId),
         )) {
             return res.status(409).json({ error: 'generated comment is too similar to recent comments' });
+        }
+        const room = db.rooms[roomId];
+        const member = room?.members?.find(candidate => candidate.avatar === charId);
+        if (!room || !member || ai.violatesPresenceClaim(safeText, post, member)) {
+            return res.status(409).json({ error: 'generated comment conflicts with photo participants' });
         }
         post.comments.push({
             id: uid('c'), author: charId, authorName: charName,
@@ -1293,6 +1547,7 @@ async function init(router) {
             if (what === 'all' || what === 'cut') {
                 const slotAt = Date.now();
                 recordSlot(room, slotAt);
+                const sharedScene = createSharedScenePlan(room, slotAt, room.members);
                 for (const member of room.members) {
                     try {
                         const result = await executeJob({
@@ -1302,6 +1557,9 @@ async function init(router) {
                             charId: member.avatar,
                             slotAt,
                             forcePost: true,
+                            sharedSceneId: sharedScene?.participantIds.includes(member.avatar)
+                                ? sharedScene.id
+                                : null,
                             attempts: 0,
                         }, true);
                         if (result?.status === 'posted') done.cuts++;
@@ -1347,6 +1605,7 @@ async function init(router) {
     router.get('/jobs', (req, res) => {
         res.json(db.jobs.map(j => ({
             type: j.type, roomId: j.roomId, charId: j.charId,
+            sharedSceneId: j.sharedSceneId || null,
             attempts: Number(j.attempts || 0),
             lastError: j.lastError || null,
             runAt: new Date(j.runAt).toLocaleString('ko-KR'),

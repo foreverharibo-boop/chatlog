@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.8.9';
+const CHATLOG_VERSION = '0.9.0';
 const MAX_MANUAL_IMAGE_BYTES = 20 * 1024 * 1024;
 
 // ── 유틸 ──────────────────────────────────────────────────
@@ -375,6 +375,24 @@ const SETTINGS_HTML = `
       </div>
       <small class="chatlog-setting-help">셀카가 선택됐을 때 해당 캐릭터에게 연결된 페르소나와 함께 찍을 비율입니다. 최근 셀카 기록의 동반 비율과 연속 한도를 함께 보정합니다. 0%면 혼자만 찍고, 참조 프사가 없으면 자동으로 혼자 셀카로 전환됩니다.</small>
 
+      <div class="chatlog-setting-field">
+        <label for="chatlog-room-meetup-chance">같은 방 공동 장면</label>
+        <div class="chatlog-setting-control chatlog-control-row">
+          <input id="chatlog-room-meetup-chance" type="number" min="0" max="100" class="text_pole chatlog-short-input">
+          <span>슬롯 중 %</span>
+        </div>
+      </div>
+      <small class="chatlog-setting-help">같은 방 캐릭터 2~3명이 같은 시간대에 카페·식사·산책·쇼핑·운동 같은 한 장소에 함께 있을 확률입니다. 관계와 성격에 따라 참석자를 고르며, 모두가 꼭 게시하지는 않습니다.</small>
+
+      <div class="chatlog-setting-field">
+        <label for="chatlog-shared-scene-post-chance">추가 참석자 게시</label>
+        <div class="chatlog-setting-control chatlog-control-row">
+          <input id="chatlog-shared-scene-post-chance" type="number" min="0" max="100" class="text_pole chatlog-short-input">
+          <span>공동 장면 중 %</span>
+        </div>
+      </div>
+      <small class="chatlog-setting-help">공동 장면의 첫 게시자 외 참석자가 같은 장소를 자기 시점으로 이어 올릴 확률입니다. 배경과 시간은 공유하고 사진 구도·피사체는 다르게 만듭니다.</small>
+
       <div class="chatlog-setting-section">댓글과 반응</div>
 
       <div class="chatlog-setting-field">
@@ -563,6 +581,8 @@ const FALLBACK_SETTINGS = {
     imageModel: 'gemini-3.1-flash-lite-image',
     selfiePhotoChance: 50,
     partnerSelfieChance: 45,
+    roomMeetupChance: 28,
+    sharedScenePostChance: 55,
     commentDelayMinMin: 1, commentDelayMaxMin: 30,
     autoCleanup: false, cleanupAfterDays: 1, keepSaved: true,
     textMode: 'profile',
@@ -658,6 +678,10 @@ async function loadSettingsUi() {
     $('#chatlog-everyday-photo-chance').val(100 - selfiePhotoChance);
     $('#chatlog-partner-selfie-chance').val(Math.max(0, Math.min(100,
         Number(s.partnerSelfieChance ?? 45))));
+    $('#chatlog-room-meetup-chance').val(Math.max(0, Math.min(100,
+        Number(s.roomMeetupChance ?? 28))));
+    $('#chatlog-shared-scene-post-chance').val(Math.max(0, Math.min(100,
+        Number(s.sharedScenePostChance ?? 55))));
     $('#chatlog-autoclean').prop('checked', !!s.autoCleanup);
     $('#chatlog-cleandays').val(s.cleanupAfterDays);
     $('#chatlog-keepsaved').prop('checked', !!s.keepSaved);
@@ -704,6 +728,10 @@ async function saveSettingsUi() {
             Number($('#chatlog-selfie-photo-chance').val()) || 0)),
         partnerSelfieChance: Math.max(0, Math.min(100,
             Number($('#chatlog-partner-selfie-chance').val()) || 0)),
+        roomMeetupChance: Math.max(0, Math.min(100,
+            Number($('#chatlog-room-meetup-chance').val()) || 0)),
+        sharedScenePostChance: Math.max(0, Math.min(100,
+            Number($('#chatlog-shared-scene-post-chance').val()) || 0)),
         followActiveProfile: $('#chatlog-follow-profile').is(':checked'),
         textMode: 'profile',
         commentDelayMinMin: Number($('#chatlog-delay-min').val()),
