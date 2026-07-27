@@ -18,7 +18,7 @@ function stripJpegPrivacyMetadata(buffer) {
     let offset = 2;
     let removed = false;
 
-    while (offset < buffer.length) {
+    parseMarkers: while (offset < buffer.length) {
         const markerStart = offset;
         if (buffer[offset] !== 0xff) throw invalidImage();
         while (offset < buffer.length && buffer[offset] === 0xff) offset++;
@@ -32,9 +32,35 @@ function stripJpegPrivacyMetadata(buffer) {
         if (marker === 0xda) {
             if (offset + 2 > buffer.length) throw invalidImage();
             const length = buffer.readUInt16BE(offset);
-            if (length < 2 || offset + length > buffer.length) throw invalidImage();
-            output.push(buffer.subarray(markerStart));
-            return { buffer: Buffer.concat(output), removed };
+            const segmentEnd = offset + length;
+            if (length < 2 || segmentEnd > buffer.length) throw invalidImage();
+            output.push(buffer.subarray(markerStart, segmentEnd));
+
+            // SOS 뒤의 압축 데이터는 0xFF 0x00 이스케이프와 restart marker를
+            // 포함할 수 있다. 실제 다음 marker/EOI까지만 복사해 파일 뒤에
+            // 덧붙은 임의 데이터가 보존되지 않도록 한다.
+            let scanOffset = segmentEnd;
+            const scanStart = scanOffset;
+            while (scanOffset < buffer.length) {
+                if (buffer[scanOffset] !== 0xff) {
+                    scanOffset++;
+                    continue;
+                }
+                let markerCodeOffset = scanOffset + 1;
+                while (markerCodeOffset < buffer.length && buffer[markerCodeOffset] === 0xff) {
+                    markerCodeOffset++;
+                }
+                if (markerCodeOffset >= buffer.length) throw invalidImage();
+                const scanMarker = buffer[markerCodeOffset];
+                if (scanMarker === 0x00 || (scanMarker >= 0xd0 && scanMarker <= 0xd7)) {
+                    scanOffset = markerCodeOffset + 1;
+                    continue;
+                }
+                output.push(buffer.subarray(scanStart, scanOffset));
+                offset = scanOffset;
+                continue parseMarkers;
+            }
+            throw invalidImage();
         }
 
         // TEM 및 restart marker는 길이 필드가 없다.

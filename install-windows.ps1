@@ -59,6 +59,15 @@ if (-not (Test-Path -LiteralPath $Config)) {
     throw "config.yaml이 없습니다. SillyTavern을 한 번 실행한 뒤 다시 시도하세요."
 }
 
+# Junction과 config.yaml을 바꾸기 전에 배포 파일 자체를 먼저 검사한다.
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    throw "Node.js를 찾을 수 없습니다. SillyTavern 설치를 먼저 확인하세요."
+}
+foreach ($ServerFile in @("index.js", "ai.js", "paths.js", "image-security.js")) {
+    & node --check (Join-Path $Source $ServerFile)
+    if ($LASTEXITCODE -ne 0) { throw "server/$ServerFile 문법 검사에 실패했습니다." }
+}
+
 Write-Host ""
 Write-Host "챗로그 자동 게시 기능은 SillyTavern 서버 플러그인을 사용합니다."
 Write-Host "서버 플러그인은 일반 확장보다 권한이 크므로 신뢰하는 플러그인만 설치해야 합니다."
@@ -135,7 +144,7 @@ if ($null -ne $TargetItem) {
         }
         catch {
             Move-Item -LiteralPath $PluginBackup -Destination $Target
-            throw "Junction 생성에 실패해 기존 폴더를 복구했습니다. PowerShell을 관리자 권한으로 다시 실행해 보세요. $($_.Exception.Message)"
+            throw "Junction 생성에 실패해 기존 폴더를 복구했습니다. 경로와 파일 사용 상태를 확인하세요. $($_.Exception.Message)"
         }
         Write-Host "기존 서버 폴더를 백업했습니다: $PluginBackup"
     }
@@ -145,7 +154,7 @@ else {
         New-Item -ItemType Junction -Path $Target -Target $Source | Out-Null
     }
     catch {
-        throw "Junction 생성에 실패했습니다. 기존 파일은 변경하지 않았습니다. PowerShell을 관리자 권한으로 다시 실행해 보세요. $($_.Exception.Message)"
+        throw "Junction 생성에 실패했습니다. 기존 파일은 변경하지 않았습니다. 경로와 파일 사용 상태를 확인하세요. $($_.Exception.Message)"
     }
     Write-Host "챗로그 서버 Junction을 만들었습니다."
 }
@@ -163,15 +172,6 @@ else {
     $ConfigText = $ConfigText.TrimEnd() + [Environment]::NewLine + [Environment]::NewLine + "enableServerPlugins: true" + [Environment]::NewLine
 }
 Write-Utf8NoBom -Path $Config -Content $ConfigText
-
-& node --check (Join-Path $Source "index.js")
-if ($LASTEXITCODE -ne 0) { throw "server/index.js 문법 검사에 실패했습니다." }
-& node --check (Join-Path $Source "ai.js")
-if ($LASTEXITCODE -ne 0) { throw "server/ai.js 문법 검사에 실패했습니다." }
-& node --check (Join-Path $Source "paths.js")
-if ($LASTEXITCODE -ne 0) { throw "server/paths.js 문법 검사에 실패했습니다." }
-& node --check (Join-Path $Source "image-security.js")
-if ($LASTEXITCODE -ne 0) { throw "server/image-security.js 문법 검사에 실패했습니다." }
 
 Write-Host ""
 Write-Host "설치가 완료되었습니다."

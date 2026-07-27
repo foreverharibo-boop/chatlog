@@ -12,6 +12,9 @@ const ST_ROOT = findSillyTavernRoot();
 const DATA_ROOT = path.resolve(ST_ROOT, 'data');
 const PUBLIC_ROOT = path.resolve(ST_ROOT, 'public');
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.avif']);
+const MAX_REFERENCE_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_CHAT_FILE_BYTES = 20 * 1024 * 1024;
+const MAX_GENERATED_IMAGE_BYTES = 25 * 1024 * 1024;
 const GOOGLE_OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const VERTEX_REGION_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
 
@@ -310,11 +313,64 @@ function imageMime(file) {
     return 'image/png';
 }
 
+function detectImageType(buffer) {
+    if (!Buffer.isBuffer(buffer) || buffer.length < 12) return null;
+    if (buffer.subarray(0, 8).equals(
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    )) return { ext: 'png', mime: 'image/png' };
+    if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+        return { ext: 'jpg', mime: 'image/jpeg' };
+    }
+    if (buffer.subarray(0, 4).toString('ascii') === 'RIFF'
+        && buffer.subarray(8, 12).toString('ascii') === 'WEBP') {
+        return { ext: 'webp', mime: 'image/webp' };
+    }
+    const gif = buffer.subarray(0, 6).toString('ascii');
+    if (gif === 'GIF87a' || gif === 'GIF89a') return { ext: 'gif', mime: 'image/gif' };
+    if (buffer.subarray(4, 8).toString('ascii') === 'ftyp') {
+        const boxLength = buffer.readUInt32BE(0);
+        if (boxLength >= 16 && boxLength <= buffer.length) {
+            const brands = [];
+            for (let offset = 8; offset + 4 <= boxLength; offset += 4) {
+                brands.push(buffer.subarray(offset, offset + 4).toString('ascii'));
+            }
+            if (brands.includes('avif') || brands.includes('avis')) {
+                return { ext: 'avif', mime: 'image/avif' };
+            }
+        }
+    }
+    return null;
+}
+
+function readVerifiedImage(candidate, allowedRoot) {
+    const extension = path.extname(candidate).toLowerCase();
+    if (!IMAGE_EXTENSIONS.has(extension)) return null;
+    const rootStat = fs.lstatSync(allowedRoot);
+    const fileStat = fs.lstatSync(candidate);
+    if (!rootStat.isDirectory()
+        || rootStat.isSymbolicLink()
+        || !fileStat.isFile()
+        || fileStat.isSymbolicLink()
+        || fileStat.size < 12
+        || fileStat.size > MAX_REFERENCE_IMAGE_BYTES) {
+        return null;
+    }
+    const realRoot = fs.realpathSync(allowedRoot);
+    const realFile = fs.realpathSync(candidate);
+    if (!isPathInside(realRoot, realFile)) return null;
+    const buffer = fs.readFileSync(realFile);
+    const type = detectImageType(buffer);
+    if (!type) return null;
+    const normalizedExtension = extension === '.jpeg' ? '.jpg' : extension;
+    if (normalizedExtension !== `.${type.ext}`) return null;
+    return { mime: type.mime, data: buffer.toString('base64') };
+}
+
 function readReferenceFile(candidates, label, filename) {
-    for (const candidate of candidates) {
+    for (const { file, root } of candidates) {
         try {
-            const buf = fs.readFileSync(candidate);
-            return { mime: imageMime(candidate), data: buf.toString('base64') };
+            const image = readVerifiedImage(file, root);
+            if (image) return image;
         } catch { /* 다음 후보 */ }
     }
     console.warn(`[chatlog] ${label} 프사를 못 찾음:`, filename);
@@ -327,8 +383,14 @@ function readAvatar(settings, avatarFile) {
     const filename = path.basename(String(avatarFile));
     const userDir = userDataDir(settings);
     return readReferenceFile([
-        path.join(userDir, 'characters', filename),
-        path.join(ST_ROOT, 'public', 'characters', filename),
+        {
+            file: path.join(userDir, 'characters', filename),
+            root: path.join(userDir, 'characters'),
+        },
+        {
+            file: path.join(PUBLIC_ROOT, 'characters', filename),
+            root: path.join(PUBLIC_ROOT, 'characters'),
+        },
     ], '캐릭터', filename);
 }
 
@@ -337,8 +399,14 @@ function readPersonaAvatar(settings, avatarFile) {
     const filename = path.basename(String(avatarFile));
     const userDir = userDataDir(settings);
     return readReferenceFile([
-        path.join(userDir, 'User Avatars', filename),
-        path.join(ST_ROOT, 'public', 'User Avatars', filename),
+        {
+            file: path.join(userDir, 'User Avatars', filename),
+            root: path.join(userDir, 'User Avatars'),
+        },
+        {
+            file: path.join(PUBLIC_ROOT, 'User Avatars', filename),
+            root: path.join(PUBLIC_ROOT, 'User Avatars'),
+        },
     ], '페르소나', filename);
 }
 
@@ -410,19 +478,36 @@ function readRecentChat(settings, memberOrName, limit = 12, persona = null, opti
         // 디렉토리명에 경로 구분자·상위 이동이 들어오면 무시 (경로 탈출 차단)
         const safeName = String(directoryName);
         if (safeName.includes('/') || safeName.includes('\\') || safeName.includes('..')) continue;
-        const dir = path.join(chatsRoot, safeName);
+        const dir = path.resolve(chatsRoot, safeName);
         try {
+            const realChatsRoot = fs.realpathSync(chatsRoot);
+            const dirStat = fs.lstatSync(dir);
+            const realDir = fs.realpathSync(dir);
+            if (!dirStat.isDirectory()
+                || dirStat.isSymbolicLink()
+                || !isPathInside(realChatsRoot, realDir)) {
+                continue;
+            }
             for (const file of fs.readdirSync(dir).filter(name => name.endsWith('.jsonl'))) {
-                const absolute = path.join(dir, file);
-                const raw = fs.readFileSync(absolute, 'utf-8');
+                const absolute = path.resolve(realDir, file);
+                if (!isPathInside(realDir, absolute)) continue;
+                const fileStat = fs.lstatSync(absolute);
+                if (!fileStat.isFile()
+                    || fileStat.isSymbolicLink()
+                    || fileStat.size > MAX_CHAT_FILE_BYTES) {
+                    continue;
+                }
+                const realFile = fs.realpathSync(absolute);
+                if (!isPathInside(realDir, realFile)) continue;
+                const raw = fs.readFileSync(realFile, 'utf-8');
                 const firstLine = raw.split('\n').find(Boolean) || '';
                 let header = {};
                 try { header = JSON.parse(firstLine); } catch { /* 구형/손상 메타 */ }
                 files.push({
-                    absolute,
+                    absolute: realFile,
                     raw,
                     score: chatPersonaScore(header, persona),
-                    time: fs.statSync(absolute).mtimeMs,
+                    time: fileStat.mtimeMs,
                 });
             }
         } catch { /* 후보 폴더 없음 */ }
@@ -473,8 +558,11 @@ function readImageAsBase64(webPath) {
             console.warn('[chatlog] 이미지 읽기 거부 (public 폴더 밖):', webPath);
             return null;
         }
-        const stat = fs.statSync(abs);
-        if (!stat.isFile()) return null;
+        const stat = fs.lstatSync(abs);
+        if (!stat.isFile()
+            || stat.isSymbolicLink()
+            || stat.size < 12
+            || stat.size > MAX_REFERENCE_IMAGE_BYTES) return null;
         const realPublicRoot = fs.realpathSync(PUBLIC_ROOT);
         const realFile = fs.realpathSync(abs);
         if (!isPathInside(realPublicRoot, realFile)) {
@@ -482,9 +570,12 @@ function readImageAsBase64(webPath) {
             return null;
         }
         const buf = fs.readFileSync(realFile);
-        const ext = path.extname(abs).slice(1).toLowerCase();
-        const mime = ext === 'jpg' ? 'image/jpeg' : `image/${ext || 'png'}`;
-        return { mime, data: buf.toString('base64') };
+        const type = detectImageType(buf);
+        const expectedExtension = path.extname(abs).toLowerCase() === '.jpeg'
+            ? '.jpg'
+            : path.extname(abs).toLowerCase();
+        if (!type || expectedExtension !== `.${type.ext}`) return null;
+        return { mime: type.mime, data: buf.toString('base64') };
     } catch {
         return null;
     }
@@ -2378,12 +2469,32 @@ async function generateImage(
     }
     if (!inline) throw new Error(`이미지 데이터 없음 — ${failures.join(' / ')}`);
 
-    const dir = path.join(ST_ROOT, 'public', 'user', 'images', 'chatlog');
+    if (typeof inline.data !== 'string'
+        || !/^[a-z0-9+/]+={0,2}$/i.test(inline.data)
+        || inline.data.length > Math.ceil(MAX_GENERATED_IMAGE_BYTES / 3) * 4 + 4) {
+        throw new Error('생성 이미지 데이터 형식이 올바르지 않습니다');
+    }
+    const generatedBuffer = Buffer.from(inline.data, 'base64');
+    if (generatedBuffer.length < 12 || generatedBuffer.length > MAX_GENERATED_IMAGE_BYTES) {
+        throw new Error('생성 이미지 크기가 허용 범위를 벗어났습니다');
+    }
+    const generatedType = detectImageType(generatedBuffer);
+    if (!generatedType || !['png', 'jpg', 'webp'].includes(generatedType.ext)) {
+        throw new Error('생성 이미지의 실제 파일 형식을 확인할 수 없습니다');
+    }
+
+    const dir = path.join(PUBLIC_ROOT, 'user', 'images', 'chatlog');
     fs.mkdirSync(dir, { recursive: true });
-    const mime = inline.mime_type || inline.mimeType || 'image/png';
-    const ext = mime === 'image/jpeg' ? 'jpg' : mime === 'image/webp' ? 'webp' : 'png';
-    const filename = `cut_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.${ext}`;
-    fs.writeFileSync(path.join(dir, filename), Buffer.from(inline.data, 'base64'));
+    const dirStat = fs.lstatSync(dir);
+    const realPublicRoot = fs.realpathSync(PUBLIC_ROOT);
+    const realDir = fs.realpathSync(dir);
+    if (!dirStat.isDirectory()
+        || dirStat.isSymbolicLink()
+        || !isPathInside(realPublicRoot, realDir)) {
+        throw new Error('챗로그 이미지 저장 폴더가 안전하지 않습니다');
+    }
+    const filename = `cut_${Date.now()}_${crypto.randomBytes(5).toString('hex')}.${generatedType.ext}`;
+    fs.writeFileSync(path.join(realDir, filename), generatedBuffer, { flag: 'wx', mode: 0o600 });
 
     return `/user/images/chatlog/${filename}`;
 }

@@ -26,6 +26,7 @@ const TEST_IMAGE_COOLDOWN_MS = 30 * 1000;
 const FORCE_COOLDOWN_MS = 30 * 1000;
 const RELOAD_COOLDOWN_MS = 5 * 1000;
 const CLEANUP_COOLDOWN_MS = 10 * 1000;
+const RELATIONSHIP_COOLDOWN_MS = 30 * 1000;
 
 // 심볼릭 링크 설치에서도 실제 server.js가 있는 ST 루트를 찾는다.
 const ST_ROOT = findSillyTavernRoot();
@@ -73,6 +74,7 @@ let settings = {
 };
 
 const protectedActions = new Map();
+const requestBuckets = new Map();
 
 function acquireProtectedAction(key, cooldownMs) {
     const now = Date.now();
@@ -114,13 +116,52 @@ function rejectProtectedAction(res, guard, label) {
     });
 }
 
+function enforceRequestBudget(req, res, next) {
+    const now = Date.now();
+    const windowMs = 60 * 1000;
+    const limit = req.method === 'GET' || req.method === 'HEAD' ? 300 : 180;
+    const remote = String(req.socket?.remoteAddress || 'local').slice(0, 80);
+    const routePath = String(req.path || req.originalUrl || '').slice(0, 160);
+    const key = `${remote}|${req.method}|${routePath}`;
+    let bucket = requestBuckets.get(key);
+    if (!bucket || now - bucket.startedAt >= windowMs) {
+        bucket = { startedAt: now, count: 0 };
+        requestBuckets.set(key, bucket);
+    }
+    bucket.count += 1;
+    if (bucket.count > limit) {
+        const retryAfterSeconds = Math.max(
+            1,
+            Math.ceil((bucket.startedAt + windowMs - now) / 1000),
+        );
+        res.set('Retry-After', String(retryAfterSeconds));
+        return res.status(429).json({
+            error: '요청이 너무 많습니다. 잠시 뒤 다시 시도하세요.',
+            retryAfterSeconds,
+        });
+    }
+    if (requestBuckets.size > 2000) {
+        for (const [bucketKey, value] of requestBuckets) {
+            if (now - value.startedAt >= windowMs) requestBuckets.delete(bucketKey);
+        }
+    }
+    next();
+}
+
+// 리버스 프록시 뒤에 두는 경우에만 CHATLOG_TRUST_PROXY=1 로 켠다.
+// 기본값에서 X-Forwarded-Host를 신뢰하면 공격자가 헤더를 위조해
+// 아래 출처 검사를 그대로 통과시킬 수 있다.
+const TRUST_FORWARDED_HOST = process.env.CHATLOG_TRUST_PROXY === '1';
+
 function requestMatchesServerOrigin(req) {
     const origin = String(req.get?.('origin') || '').trim();
     if (!origin) return true; // curl·로컬 서버 호출은 ST 인증 계층에 맡긴다.
     try {
         const originHost = new URL(origin).host.toLowerCase();
-        const forwardedHost = String(req.get?.('x-forwarded-host') || '')
-            .split(',')[0].trim().toLowerCase();
+        const forwardedHost = TRUST_FORWARDED_HOST
+            ? String(req.get?.('x-forwarded-host') || '')
+                .split(',')[0].trim().toLowerCase()
+            : '';
         const requestHost = forwardedHost || String(req.get?.('host') || '').trim().toLowerCase();
         return !!requestHost && originHost === requestHost;
     } catch {
@@ -130,6 +171,25 @@ function requestMatchesServerOrigin(req) {
 
 function loadJson(p, fallback) {
     try { return JSON.parse(fs.readFileSync(p, 'utf-8')); } catch { return fallback; }
+}
+
+function atomicWriteJson(targetPath, value) {
+    const directory = path.dirname(targetPath);
+    fs.mkdirSync(directory, { recursive: true });
+    const temporaryPath = path.join(
+        directory,
+        `.${path.basename(targetPath)}.${process.pid}.${Date.now()}.tmp`,
+    );
+    try {
+        fs.writeFileSync(temporaryPath, JSON.stringify(value, null, 2), {
+            encoding: 'utf8',
+            mode: 0o600,
+        });
+        fs.renameSync(temporaryPath, targetPath);
+    } catch (error) {
+        try { fs.unlinkSync(temporaryPath); } catch { /* 생성 전 실패 또는 이미 이동됨 */ }
+        throw error;
+    }
 }
 
 function cleanDisplayName(value) {
@@ -236,16 +296,25 @@ function loadAll() {
 }
 
 let saveTimer = null;
+function flushDbSave() {
+    if (saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+    }
+    atomicWriteJson(DATA_PATH, db);
+}
+
 function saveDb() {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
-        try { fs.writeFileSync(DATA_PATH, JSON.stringify(db, null, 2)); }
+        saveTimer = null;
+        try { atomicWriteJson(DATA_PATH, db); }
         catch (e) { console.error('[chatlog] 저장 실패:', e.message); }
     }, 300);
 }
 
 function saveSettings() {
-    try { fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2)); }
+    try { atomicWriteJson(SETTINGS_PATH, settings); }
     catch (e) { console.error('[chatlog] 설정 저장 실패:', e.message); }
 }
 
@@ -270,7 +339,7 @@ function markJobSuccess(job, result) {
 
 function markJobError(job, error, retryAt = null) {
     db.runtime.lastErrorAt = Date.now();
-    db.runtime.lastError = `${jobLabel(job).replace(/ 완료$/, '')}: ${error.message}`
+    db.runtime.lastError = `${jobLabel(job).replace(/ 완료$/, '')}: ${sanitizeRuntimeError(error.message)}`
         + (retryAt ? ` · ${new Date(retryAt).toLocaleTimeString('ko-KR')} 재시도` : '');
 }
 
@@ -300,6 +369,166 @@ function validRecordId(value, prefix) {
     return normalized.length <= 128
         && normalized.startsWith(`${prefix}_`)
         && /^[a-z0-9_]+$/i.test(normalized);
+}
+
+// roomId가 생략 가능한 엔드포인트용. 값이 있으면 반드시 정상 room ID여야 한다.
+// 검사를 빠뜨리면 "__proto__" 같은 값이 db.rooms 조회를 통과해
+// Object.prototype을 방 객체로 오인하게 만든다.
+function validOptionalRoomId(value) {
+    return value === undefined || value === null || value === ''
+        ? true
+        : validRecordId(value, 'room');
+}
+
+const VALID_JOB_TYPES = new Set(['cut', 'comment', 'engagement', 'reaction']);
+const DANGEROUS_OBJECT_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+
+function isPlainRecord(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const prototype = Object.getPrototypeOf(value);
+    return prototype === Object.prototype || prototype === null;
+}
+
+function limitedString(value, maxLength, { required = false, trim = true } = {}) {
+    if (typeof value !== 'string') {
+        if (required) throw new TypeError('required string is missing');
+        return '';
+    }
+    const normalized = trim ? value.trim() : value;
+    if ((required && !normalized) || normalized.length > maxLength || normalized.includes('\0')) {
+        throw new TypeError('invalid string');
+    }
+    return normalized;
+}
+
+function normalizeAssetName(value, { required = false } = {}) {
+    const normalized = limitedString(value, 260, { required });
+    if (normalized && (/[\\/]/.test(normalized) || normalized === '.' || normalized === '..')) {
+        throw new TypeError('invalid asset name');
+    }
+    return normalized || null;
+}
+
+function normalizeMemberInput(member) {
+    if (!isPlainRecord(member)) throw new TypeError('invalid room member');
+    const avatar = normalizeAssetName(member.avatar, { required: true });
+    return {
+        avatar,
+        name: cleanDisplayName(limitedString(member.name || avatar, 120, { required: true })),
+        description: limitedString(member.description || '', 60000, { trim: false }),
+        personality: limitedString(member.personality || '', 30000, { trim: false }),
+        scenario: limitedString(member.scenario || '', 30000, { trim: false }),
+        mesExample: limitedString(member.mesExample || '', 30000, { trim: false }),
+    };
+}
+
+function normalizeMembersInput(members) {
+    if (!Array.isArray(members) || members.length < 1 || members.length > 100) {
+        throw new TypeError('invalid room members');
+    }
+    const normalized = members.map(normalizeMemberInput);
+    const avatars = normalized.map(member => member.avatar);
+    if (new Set(avatars).size !== avatars.length) throw new TypeError('duplicate room member');
+    return normalized;
+}
+
+function normalizePersonaInput(persona) {
+    if (persona === null || persona === undefined) return null;
+    if (!isPlainRecord(persona)) throw new TypeError('invalid persona');
+    return {
+        name: limitedString(persona.name || '유저', 120, { required: true }),
+        description: limitedString(persona.description || '', 60000, { trim: false }),
+        avatar: normalizeAssetName(persona.avatar),
+        file: normalizeAssetName(persona.file),
+    };
+}
+
+function normalizeMemberPersonasInput(memberPersonas, members) {
+    if (memberPersonas === null || memberPersonas === undefined) return {};
+    if (!isPlainRecord(memberPersonas)) throw new TypeError('invalid member personas');
+    const knownMembers = new Set((members || []).map(member => member.avatar));
+    const entries = Object.entries(memberPersonas);
+    if (entries.length > Math.max(100, knownMembers.size)) {
+        throw new TypeError('too many member personas');
+    }
+    const normalized = Object.create(null);
+    for (const [memberId, persona] of entries) {
+        if (DANGEROUS_OBJECT_KEYS.has(memberId) || !knownMembers.has(memberId)) {
+            throw new TypeError('invalid member persona key');
+        }
+        normalized[memberId] = normalizePersonaInput(persona);
+    }
+    return normalized;
+}
+
+function normalizeScheduleInput(schedule, fallback = {}) {
+    if (!isPlainRecord(schedule)) throw new TypeError('invalid room schedule');
+    const allowed = new Set([
+        'activeFrom',
+        'activeTo',
+        'cutIntervalHours',
+        'maxSilenceHours',
+        'jitter',
+    ]);
+    if (Object.keys(schedule).some(key => !allowed.has(key))) {
+        throw new TypeError('invalid room schedule field');
+    }
+    const numberInRange = (key, defaultValue, min, max) => {
+        const raw = schedule[key] ?? fallback[key] ?? defaultValue;
+        const value = Number(raw);
+        if (!Number.isFinite(value) || value < min || value > max) {
+            throw new TypeError(`invalid ${key}`);
+        }
+        return value;
+    };
+    const normalized = {
+        activeFrom: numberInRange('activeFrom', 8, 0, 23),
+        activeTo: numberInRange('activeTo', 24, 1, 24),
+        cutIntervalHours: numberInRange('cutIntervalHours', 2, 1, 168),
+        maxSilenceHours: numberInRange('maxSilenceHours', 12, 1, 720),
+        jitter: schedule.jitter ?? fallback.jitter ?? true,
+    };
+    if (normalized.activeFrom >= normalized.activeTo || typeof normalized.jitter !== 'boolean') {
+        throw new TypeError('invalid room schedule');
+    }
+    return normalized;
+}
+
+function normalizeManualRelations(room, value, kind) {
+    if (!Array.isArray(value) || value.length > 10000) {
+        throw new TypeError(`invalid ${kind}`);
+    }
+    const knownMembers = new Set((room.members || []).map(member => member.avatar));
+    return value.map(item => {
+        if (!isPlainRecord(item)) throw new TypeError(`invalid ${kind}`);
+        const normalized = { ...item };
+        for (const [key, fieldValue] of Object.entries(normalized)) {
+            if (DANGEROUS_OBJECT_KEYS.has(key)) throw new TypeError(`invalid ${kind}`);
+            if (typeof fieldValue === 'string' && fieldValue.length > 1000) {
+                normalized[key] = fieldValue.slice(0, 1000);
+            }
+        }
+        const ids = kind === 'memberRelations'
+            ? [normalized.memberAvatar]
+            : [normalized.aAvatar, normalized.bAvatar];
+        if (ids.some(id => typeof id !== 'string' || !knownMembers.has(id))) {
+            throw new TypeError(`unknown member in ${kind}`);
+        }
+        return { ...normalized, confidence: 'manual', locked: true };
+    });
+}
+
+// 프로바이더 오류 본문에는 프로젝트 ID 등이 섞일 수 있어
+// /status로 그대로 내보내지 않는다.
+function sanitizeRuntimeError(message) {
+    const normalized = String(message || '').replace(/\s+/g, ' ').trim();
+    const bodyStart = normalized.search(/[:\s][{[]/);
+    const summary = bodyStart >= 0 ? normalized.slice(0, bodyStart) : normalized;
+    return summary
+        .replace(/https?:\/\/\S+/gi, '[endpoint]')
+        .replace(/\bprojects?[\/#:\s]+[a-z0-9._-]+/gi, 'project [redacted]')
+        .replace(/\b(?:api[_ -]?key|key|token|secret)\s*[=:]\s*[^\s,;]+/gi, '$1=[redacted]')
+        .slice(0, 200);
 }
 const rand = (min, max) => min + Math.random() * (max - min);
 const COMMENT_INTENTS = ['detail', 'tease', 'question', 'opinion', 'practical', 'callback', 'minimal'];
@@ -585,7 +814,10 @@ function enqueueEngagement(room, post) {
     saveDb();
 }
 
-const findPost = (roomId, postId) => (db.posts[roomId] || []).find(p => p.id === postId);
+const findPost = (roomId, postId) => {
+    if (!validRecordId(roomId, 'room') || !validRecordId(postId, 'post')) return null;
+    return (db.posts[roomId] || []).find(p => p.id === postId);
+};
 const findMember = (room, avatar) => room.members.find(m => m.avatar === avatar);
 function recentRoomCommentTexts(roomId, excludePostId = null, limit = 18) {
     return (db.posts[roomId] || [])
@@ -825,12 +1057,16 @@ async function executeJob(job, allowRetry = true) {
             db.jobs.push({
                 ...job,
                 attempts,
-                lastError: error.message,
+                lastError: sanitizeRuntimeError(error.message),
                 runAt: retryAt,
             });
             markJobError(job, error, retryAt);
             console.warn(`[chatlog] 작업 재시도 예약 (${attempts}/3):`, job.type, error.message);
-            return { status: 'retrying', retryAt, error: error.message };
+            return {
+                status: 'retrying',
+                retryAt,
+                error: sanitizeRuntimeError(error.message),
+            };
         }
         markJobError(job, error);
         throw error;
@@ -915,9 +1151,12 @@ function saveManualImage(imageBase64, mimeHint) {
     const { buffer, type } = decodeManualImage(imageBase64, mimeHint);
     const sanitized = stripImagePrivacyMetadata(buffer, type);
     fs.mkdirSync(CHATLOG_IMAGE_DIR, { recursive: true });
+    const imageRootStat = fs.lstatSync(CHATLOG_IMAGE_DIR);
     const realPublicRoot = fs.realpathSync(PUBLIC_DIR);
     const realImageRoot = fs.realpathSync(CHATLOG_IMAGE_DIR);
-    if (!isPathInside(realPublicRoot, realImageRoot)) {
+    if (!imageRootStat.isDirectory()
+        || imageRootStat.isSymbolicLink()
+        || !isPathInside(realPublicRoot, realImageRoot)) {
         throw imageUploadError('챗로그 사진 폴더의 실제 경로가 올바르지 않아요.');
     }
     const filename = `${uid('post')}.${type.ext}`;
@@ -943,8 +1182,12 @@ function resolveChatlogImage(webPath, requireExisting = false) {
     }
     if (!requireExisting) return abs;
     try {
-        const stat = fs.statSync(abs);
-        if (!stat.isFile()) return null;
+        const imageRootStat = fs.lstatSync(CHATLOG_IMAGE_DIR);
+        const stat = fs.lstatSync(abs);
+        if (!imageRootStat.isDirectory()
+            || imageRootStat.isSymbolicLink()
+            || !stat.isFile()
+            || stat.isSymbolicLink()) return null;
         const realPublicRoot = fs.realpathSync(PUBLIC_DIR);
         const realImageRoot = fs.realpathSync(CHATLOG_IMAGE_DIR);
         const realFile = fs.realpathSync(abs);
@@ -1000,13 +1243,41 @@ function runCleanup() {
     }
 
     // 하루로그 내보내기 파일도 같이 정리
-    const exportDir = path.join(ST_ROOT, 'public', 'user', 'images', 'chatlog', 'daylog');
+    const exportDir = path.resolve(CHATLOG_IMAGE_DIR, 'daylog');
     try {
-        for (const f of fs.readdirSync(exportDir)) {
-            const fp = path.join(exportDir, f);
-            if (fs.statSync(fp).mtimeMs < cutoffTs) { fs.unlinkSync(fp); removed++; }
+        const imageRootStat = fs.lstatSync(CHATLOG_IMAGE_DIR);
+        const exportDirStat = fs.lstatSync(exportDir);
+        if (!imageRootStat.isDirectory()
+            || imageRootStat.isSymbolicLink()
+            || !exportDirStat.isDirectory()
+            || exportDirStat.isSymbolicLink()) {
+            throw new Error('하루로그 폴더가 실제 디렉터리가 아닙니다');
         }
-    } catch { /* 폴더 없으면 무시 */ }
+        const realImageRoot = fs.realpathSync(CHATLOG_IMAGE_DIR);
+        const realExportDir = fs.realpathSync(exportDir);
+        if (!isPathInside(realImageRoot, realExportDir)) {
+            throw new Error('하루로그 폴더가 이미지 루트 밖을 가리킵니다');
+        }
+        for (const f of fs.readdirSync(exportDir)) {
+            const fp = path.resolve(realExportDir, f);
+            if (!isPathInside(realExportDir, fp)) {
+                console.warn('[chatlog] 하루로그 삭제 거부 (폴더 밖):', f);
+                continue;
+            }
+            const stat = fs.lstatSync(fp);
+            if (stat.isSymbolicLink() || !stat.isFile()) continue;
+            const realFile = fs.realpathSync(fp);
+            if (!isPathInside(realExportDir, realFile)) {
+                console.warn('[chatlog] 하루로그 삭제 거부 (실제 경로 밖):', f);
+                continue;
+            }
+            if (stat.mtimeMs < cutoffTs) { fs.unlinkSync(realFile); removed++; }
+        }
+    } catch (error) {
+        if (error?.code !== 'ENOENT') {
+            console.warn('[chatlog] 하루로그 자동 정리 건너뜀:', error.message);
+        }
+    }
 
     if (removed || removedSlots) {
         console.log(`[chatlog] 자동 정리: 기록 ${removed}건, 빈 슬롯 ${removedSlots}건 삭제`);
@@ -1073,6 +1344,7 @@ function skipMissedSlots(room, now) {
 
 // ── 매분 틱 ───────────────────────────────────────────────
 let ticking = false;
+let tickTimer = null;
 async function tick() {
     if (ticking) return;
     ticking = true;
@@ -1155,6 +1427,7 @@ async function init(router) {
         }
         next();
     });
+    router.use(enforceRequestBudget);
 
     router.get('/state', (req, res) => res.json({ rooms: db.rooms, posts: db.posts }));
     router.get('/status', (req, res) => res.json(statusPayload()));
@@ -1173,6 +1446,9 @@ async function init(router) {
         }
         for (const key of ['profileName', 'imageProfileName']) {
             const profileName = String(body[key] || '').trim();
+            if (profileName.length > 200 || profileName.includes('\0')) {
+                return res.status(400).json({ error: `invalid ${key}` });
+            }
             if (!profileName) continue;
             const profile = ai.resolveProfileApi(settings, profileName, key === 'imageProfileName' ? 'image' : 'text');
             if (!profile || profile.source !== 'vertexai') {
@@ -1230,7 +1506,9 @@ async function init(router) {
                 settings[k] = 'vertex';
                 continue;
             }
-            settings[k] = body[k];
+            settings[k] = Object.prototype.hasOwnProperty.call(numericRanges, k)
+                ? Number(body[k])
+                : body[k];
         }
         saveSettings();
         ai.setDebugEnabled(settings.debugEnabled === true);
@@ -1248,18 +1526,27 @@ async function init(router) {
         if (typeof name !== 'string' || !name.trim() || name.length > 100) {
             return res.status(400).json({ error: 'invalid room name' });
         }
-        if (!Array.isArray(members) || members.length < 1 || members.length > 100) {
-            return res.status(400).json({ error: 'invalid room members' });
+        let normalizedMembers;
+        let normalizedPersona;
+        let normalizedMemberPersonas;
+        let normalizedSchedule;
+        try {
+            normalizedMembers = normalizeMembersInput(members);
+            normalizedPersona = normalizePersonaInput(persona);
+            normalizedMemberPersonas = normalizeMemberPersonasInput(
+                memberPersonas,
+                normalizedMembers,
+            );
+            normalizedSchedule = normalizeScheduleInput(schedule);
+        } catch (error) {
+            return res.status(400).json({ error: sanitizeRuntimeError(error.message) || 'invalid room' });
         }
-        if (!schedule || typeof schedule !== 'object' || Array.isArray(schedule)) {
-            return res.status(400).json({ error: 'invalid room schedule' });
-        }
-        const normalizedMembers = members.map(member => ({
-            ...member,
-            name: cleanDisplayName(member.name || member.avatar),
-        }));
         const room = {
-            id: uid('room'), name: name.trim(), members: normalizedMembers, persona, memberPersonas,
+            id: uid('room'),
+            name: name.trim(),
+            members: normalizedMembers,
+            persona: normalizedPersona,
+            memberPersonas: normalizedMemberPersonas,
             createdAt: Date.now(), paused: false,
             slotHistory: [],
             sharedScenes: [],
@@ -1267,21 +1554,15 @@ async function init(router) {
                 version: 2,
                 status: 'ready',
                 generatedAt: null,
-                displayPersona: persona
-                    ? { name: persona.name || '유저', avatar: persona.avatar || null }
+                displayPersona: normalizedPersona
+                    ? { name: normalizedPersona.name || '유저', avatar: normalizedPersona.avatar || null }
                     : null,
                 memberRelations: [],
                 characterRelations: [],
                 summary: '',
                 lastError: null,
             },
-            schedule: {
-                activeFrom: schedule.activeFrom ?? 8,
-                activeTo: schedule.activeTo ?? 24,
-                cutIntervalHours: schedule.cutIntervalHours ?? 2,
-                maxSilenceHours: schedule.maxSilenceHours ?? 12,
-                jitter: schedule.jitter ?? true,
-            },
+            schedule: normalizedSchedule,
         };
         room.nextSlotAt = computeNextSlot(room);
         db.rooms[room.id] = room;
@@ -1292,6 +1573,7 @@ async function init(router) {
 
     router.post('/room/update', (req, res) => {
         const { roomId, ...patch } = req.body || {};
+        if (!validRecordId(roomId, 'room')) return res.status(400).json({ error: 'invalid room id' });
         const room = db.rooms[roomId];
         if (!room) return res.status(404).json({ error: 'room not found' });
         const allowedKeys = new Set([
@@ -1310,22 +1592,36 @@ async function init(router) {
             && (typeof patch.name !== 'string' || !patch.name.trim() || patch.name.length > 100)) {
             return res.status(400).json({ error: 'invalid room name' });
         }
-        if (patch.members !== undefined
-            && (!Array.isArray(patch.members)
-                || patch.members.length < 1
-                || patch.members.length > 100)) {
-            return res.status(400).json({ error: 'invalid room members' });
-        }
-        if (patch.schedule !== undefined
-            && (!patch.schedule
-                || typeof patch.schedule !== 'object'
-                || Array.isArray(patch.schedule))) {
-            return res.status(400).json({ error: 'invalid room schedule' });
-        }
         if (patch.paused !== undefined && typeof patch.paused !== 'boolean') {
             return res.status(400).json({ error: 'invalid paused value' });
         }
         if (patch.name !== undefined) patch.name = patch.name.trim();
+        try {
+            if (patch.members !== undefined) patch.members = normalizeMembersInput(patch.members);
+            const membersForPersonas = patch.members || room.members || [];
+            if (patch.persona !== undefined) patch.persona = normalizePersonaInput(patch.persona);
+            if (patch.memberPersonas !== undefined) {
+                patch.memberPersonas = normalizeMemberPersonasInput(
+                    patch.memberPersonas,
+                    membersForPersonas,
+                );
+            } else if (patch.members !== undefined) {
+                const knownMemberIds = new Set(membersForPersonas.map(member => member.avatar));
+                const retainedPersonas = Object.fromEntries(
+                    Object.entries(room.memberPersonas || {})
+                        .filter(([memberId]) => knownMemberIds.has(memberId)),
+                );
+                patch.memberPersonas = normalizeMemberPersonasInput(
+                    retainedPersonas,
+                    membersForPersonas,
+                );
+            }
+            if (patch.schedule !== undefined) {
+                patch.schedule = normalizeScheduleInput(patch.schedule, room.schedule || {});
+            }
+        } catch (error) {
+            return res.status(400).json({ error: sanitizeRuntimeError(error.message) || 'invalid room update' });
+        }
         const personaBefore = JSON.stringify(room.persona || null);
         const identityBefore = JSON.stringify({
             persona: room.persona || null,
@@ -1339,12 +1635,6 @@ async function init(router) {
                 mesExample: member.mesExample || '',
             })),
         });
-        if (patch.members) {
-            patch.members = patch.members.map(member => ({
-                ...member,
-                name: cleanDisplayName(member.name || member.avatar),
-            }));
-        }
         Object.assign(room, patch);
         const identityAfter = JSON.stringify({
             persona: room.persona || null,
@@ -1379,22 +1669,27 @@ async function init(router) {
 
     router.post('/room/relationships/manual', (req, res) => {
         const { roomId, memberRelations = [], characterRelations } = req.body || {};
+        if (!validRecordId(roomId, 'room')) return res.status(400).json({ error: 'invalid room id' });
         const room = db.rooms[roomId];
         if (!room) return res.status(404).json({ error: 'room not found' });
         const previous = room.relationshipGraph || {};
+        let normalizedMemberRelations;
+        let normalizedCharacterRelations;
+        try {
+            normalizedMemberRelations = normalizeManualRelations(
+                room,
+                memberRelations,
+                'memberRelations',
+            );
+            normalizedCharacterRelations = characterRelations === undefined
+                ? previous.characterRelations || []
+                : normalizeManualRelations(room, characterRelations, 'characterRelations');
+        } catch (error) {
+            return res.status(400).json({ error: sanitizeRuntimeError(error.message) || 'invalid relationships' });
+        }
         room.relationshipGraph = ai.normalizeRelationshipGraph(room, {
-            memberRelations: memberRelations.map(item => ({
-                ...item,
-                confidence: 'manual',
-                locked: true,
-            })),
-            characterRelations: Array.isArray(characterRelations)
-                ? characterRelations.map(item => ({
-                    ...item,
-                    confidence: 'manual',
-                    locked: true,
-                }))
-                : previous.characterRelations || [],
+            memberRelations: normalizedMemberRelations,
+            characterRelations: normalizedCharacterRelations,
         });
         room.relationshipGraph.version = 2;
         room.relationshipGraph.source = 'manual';
@@ -1406,11 +1701,14 @@ async function init(router) {
 
     router.post('/room/relationships/refresh', async (req, res) => {
         const { roomId } = req.body || {};
+        if (!validRecordId(roomId, 'room')) return res.status(400).json({ error: 'invalid room id' });
         const room = db.rooms[roomId];
         if (!room) return res.status(404).json({ error: 'room not found' });
         if (room.relationshipGraph?.status === 'building') {
             return res.status(409).json({ error: '이미 관계를 분석하고 있어요.' });
         }
+        const guard = acquireProtectedAction(`relationships:${roomId}`, RELATIONSHIP_COOLDOWN_MS);
+        if (!guard.ok) return rejectProtectedAction(res, guard, '관계 분석');
 
         room.relationshipGraph = {
             ...(room.relationshipGraph || {}),
@@ -1433,11 +1731,15 @@ async function init(router) {
                 version: 2,
                 status: 'error',
                 generatedAt: null,
-                lastError: String(error?.message || error).slice(0, 800),
+                lastError: sanitizeRuntimeError(error?.message || error),
             };
             saveDb();
             console.error('[chatlog] 단톡 관계 분석 실패:', error);
-            res.status(500).json({ error: `관계 분석 실패: ${error.message}` });
+            res.status(500).json({
+                error: `관계 분석 실패: ${sanitizeRuntimeError(error.message) || 'AI 요청 실패'}`,
+            });
+        } finally {
+            guard.release();
         }
     });
 
@@ -1447,17 +1749,29 @@ async function init(router) {
             res.json({ ok: true, path: imagePath });
         } catch (error) {
             console.warn('[chatlog] 수동 이미지 업로드 거부:', error.message);
-            res.status(error.statusCode || 400).json({ error: error.message });
+            res.status(error.statusCode || 400).json({
+                error: sanitizeRuntimeError(error.message) || '이미지 업로드 실패',
+            });
         }
     });
 
     router.post('/post', (req, res) => {
         const { roomId, text = '', image = null } = req.body || {};
+        if (!validRecordId(roomId, 'room')) return res.status(400).json({ error: 'invalid room id' });
         const room = db.rooms[roomId];
         if (!room) return res.status(404).json({ error: 'room not found' });
+        // 다른 입력 경로처럼 문자열만 받고 길이를 제한한다.
+        // 제한이 없으면 data.json과 AI 프롬프트가 무한히 커진다.
+        if (typeof text !== 'string') {
+            return res.status(400).json({ error: 'invalid post text' });
+        }
+        const safeText = text.slice(0, 500);
 
         // 이미지 경로 검증 — chatlog 이미지 폴더 내부 경로만 허용 (../ 탈출 차단)
         let safeImage = null;
+        if (image !== null && image !== undefined && typeof image !== 'string') {
+            return res.status(400).json({ error: 'invalid image path' });
+        }
         if (image && typeof image === 'string') {
             const abs = resolveChatlogImage(image, true);
             if (abs) safeImage = image;
@@ -1468,7 +1782,7 @@ async function init(router) {
             id: uid('post'), roomId, author: 'user',
             authorName: room.persona?.name || settings.userPersonaName || null,
             slotAt: Date.now(), createdAt: Date.now(),
-            text, image: safeImage, imageSource: 'upload',
+            text: safeText, image: safeImage, imageSource: 'upload',
             sceneId: null, sceneContext: null,
             presenceKnown: false, presentPeople: [], visiblePeople: [],
             read: true, comments: [], reactions: [],
@@ -1481,6 +1795,7 @@ async function init(router) {
 
     router.post('/read', (req, res) => {
         const { roomId } = req.body || {};
+        if (!validRecordId(roomId, 'room')) return res.status(400).json({ error: 'invalid room id' });
         for (const p of db.posts[roomId] || []) {
             p.read = true;
             p.comments.forEach(c => { c.read = true; });
@@ -1510,7 +1825,10 @@ async function init(router) {
             res.json({ ok: true, reloaded: ['ai.js', 'settings.json'] });
         } catch (e) {
             console.error('[chatlog] 리로드 실패:', e.message);
-            res.status(500).json({ ok: false, error: e.message });
+            res.status(500).json({
+                ok: false,
+                error: sanitizeRuntimeError(e.message) || '리로드 실패',
+            });
         } finally {
             guard.release();
         }
@@ -1519,6 +1837,13 @@ async function init(router) {
     // 클라이언트가 대기 댓글 작업을 가져감 (가져가면 큐에서 제거)
     router.post('/jobs/claim', (req, res) => {
         const { roomId, type = 'comment' } = req.body || {};
+        if (!validOptionalRoomId(roomId)) {
+            return res.status(400).json({ error: 'invalid room id' });
+        }
+        // 임의 type을 허용하면 유효한 작업을 큐에서 통째로 빼돌릴 수 있다.
+        if (!VALID_JOB_TYPES.has(type)) {
+            return res.status(400).json({ error: 'invalid job type' });
+        }
         const claimed = db.jobs.filter(j => j.type === type && (!roomId || j.roomId === roomId));
         db.jobs = db.jobs.filter(j => !claimed.includes(j));
         saveDb();
@@ -1538,11 +1863,71 @@ async function init(router) {
     });
 
     router.post('/jobs/requeue', (req, res) => {
-        const source = req.body?.job || {};
+        const source = req.body?.job;
+        if (!isPlainRecord(source)) {
+            return res.status(400).json({ error: 'invalid job' });
+        }
         if (!source.roomId || !source.charId || !source.type) {
             return res.status(400).json({ error: 'invalid job' });
         }
-        const attempts = Number(source.attempts || 0) + 1;
+        if (!validRecordId(source.roomId, 'room') || !VALID_JOB_TYPES.has(source.type)) {
+            return res.status(400).json({ error: 'invalid job' });
+        }
+        if (source.postId !== undefined
+            && source.postId !== null
+            && !validRecordId(source.postId, 'post')) {
+            return res.status(400).json({ error: 'invalid job' });
+        }
+        const room = db.rooms[source.roomId];
+        if (!room) {
+            return res.status(404).json({ error: 'room not found' });
+        }
+        const member = room.members?.find(candidate => candidate.avatar === source.charId);
+        if (!member) return res.status(400).json({ error: 'unknown job character' });
+        if (source.id !== undefined && !validRecordId(source.id, 'job')) {
+            return res.status(400).json({ error: 'invalid job id' });
+        }
+        if (source.id && db.jobs.some(candidate => candidate.id === source.id)) {
+            return res.status(409).json({ error: 'job already queued' });
+        }
+        const needsPost = source.type !== 'cut';
+        const post = source.postId ? findPost(source.roomId, source.postId) : null;
+        if (needsPost && !post) return res.status(400).json({ error: 'job post not found' });
+        if (!needsPost && source.postId) return res.status(400).json({ error: 'cut job cannot target post' });
+        if (source.replyToCommentId !== undefined
+            && source.replyToCommentId !== null
+            && (!validRecordId(source.replyToCommentId, 'c')
+                || !post?.comments?.some(comment => comment.id === source.replyToCommentId))) {
+            return res.status(400).json({ error: 'reply target not found' });
+        }
+        if (source.commentIntent !== undefined
+            && source.commentIntent !== null
+            && !COMMENT_INTENTS.includes(source.commentIntent)) {
+            return res.status(400).json({ error: 'invalid comment intent' });
+        }
+        if (source.commentWanted !== undefined && typeof source.commentWanted !== 'boolean') {
+            return res.status(400).json({ error: 'invalid commentWanted' });
+        }
+        if (source.forcePost !== undefined && typeof source.forcePost !== 'boolean') {
+            return res.status(400).json({ error: 'invalid forcePost' });
+        }
+        if (source.sharedSceneId !== undefined
+            && source.sharedSceneId !== null
+            && (!validRecordId(source.sharedSceneId, 'scene')
+                || !findSharedScene(room, source.sharedSceneId))) {
+            return res.status(400).json({ error: 'shared scene not found' });
+        }
+        if (source.slotAt !== undefined
+            && source.slotAt !== null
+            && (!Number.isFinite(Number(source.slotAt))
+                || Math.abs(Number(source.slotAt) - Date.now()) > 31 * 24 * 3600 * 1000)) {
+            return res.status(400).json({ error: 'invalid slotAt' });
+        }
+        const sourceAttempts = Number(source.attempts || 0);
+        if (!Number.isInteger(sourceAttempts) || sourceAttempts < 0) {
+            return res.status(400).json({ error: 'invalid attempts' });
+        }
+        const attempts = sourceAttempts + 1;
         if (attempts >= RETRY_DELAYS_MS.length + 1) {
             return res.status(400).json({ error: 'retry limit reached' });
         }
@@ -1551,29 +1936,38 @@ async function init(router) {
             id: source.id || uid('job'),
             type: source.type,
             roomId: source.roomId,
-            postId: source.postId,
-            charId: source.charId,
-            replyToCommentId: source.replyToCommentId,
-            commentWanted: source.commentWanted,
-            commentIntent: source.commentIntent,
-            slotAt: source.slotAt,
-            forcePost: source.forcePost,
+            postId: needsPost ? post.id : undefined,
+            charId: member.avatar,
+            replyToCommentId: source.replyToCommentId || undefined,
+            commentWanted: source.commentWanted === true,
+            commentIntent: source.commentIntent || undefined,
+            slotAt: source.slotAt === undefined ? undefined : Number(source.slotAt),
+            forcePost: source.forcePost === true,
             sharedSceneId: source.sharedSceneId || null,
             attempts,
             runAt: retryAt,
         };
         db.jobs.push(job);
-        markJobError(job, new Error(req.body?.error || '브라우저 작업 실패'), retryAt);
+        markJobError(
+            job,
+            new Error(sanitizeRuntimeError(req.body?.error) || '브라우저 작업 실패'),
+            retryAt,
+        );
         saveDb();
         res.json({ ok: true, retryAt, attempts });
     });
 
     // 클라이언트가 생성한 댓글을 되돌려 넣음
     router.post('/comment/push', (req, res) => {
-        const { roomId, postId, charId, charName, text } = req.body || {};
+        // charName은 더 이상 클라이언트 값을 신뢰하지 않고 서버 멤버 목록에서 가져온다.
+        const { roomId, postId, charId, text } = req.body || {};
+        if (!validRecordId(roomId, 'room')) return res.status(400).json({ error: 'invalid room id' });
         const post = findPost(roomId, postId);
         if (!post) return res.status(404).json({ error: 'post not found' });
-        const safeText = String(text || '').trim().slice(0, 120);
+        if (typeof text !== 'string') {
+            return res.status(400).json({ error: 'invalid generated comment' });
+        }
+        const safeText = text.trim().slice(0, 120);
         if (!safeText || exposesInternalRoleLabel(safeText)) {
             return res.status(400).json({ error: 'invalid generated comment' });
         }
@@ -1590,7 +1984,7 @@ async function init(router) {
             return res.status(409).json({ error: 'generated comment conflicts with photo participants' });
         }
         post.comments.push({
-            id: uid('c'), author: charId, authorName: charName,
+            id: uid('c'), author: member.avatar, authorName: member.name,
             text: safeText, createdAt: Date.now(), read: false,
         });
         saveDb();
@@ -1602,6 +1996,10 @@ async function init(router) {
         const guard = acquireProtectedAction('test-image', TEST_IMAGE_COOLDOWN_MS);
         if (!guard.ok) return rejectProtectedAction(res, guard, '이미지 테스트');
         try {
+            if (req.body?.prompt !== undefined
+                && (typeof req.body.prompt !== 'string' || req.body.prompt.length > 1000)) {
+                return res.status(400).json({ ok: false, error: 'invalid image prompt' });
+            }
             const p = await ai.generateImage(
                 settings,
                 req.body?.prompt || 'a cozy desk with a warm lamp at night, seen from first person',
@@ -1615,7 +2013,11 @@ async function init(router) {
             );
             res.json({ ok: true, path: p });
         } catch (e) {
-            res.status(500).json({ ok: false, error: e.message });
+            console.error('[chatlog] 이미지 테스트 실패:', e);
+            res.status(500).json({
+                ok: false,
+                error: sanitizeRuntimeError(e.message) || '이미지 생성 실패',
+            });
         } finally {
             guard.release();
         }
@@ -1624,10 +2026,13 @@ async function init(router) {
     // 유저 답글 — 캐릭터 게시물이면 그 캐릭터의 대댓글을 예약
     router.post('/comment/user', (req, res) => {
         const { roomId, postId, text } = req.body || {};
+        if (!validRecordId(roomId, 'room')) return res.status(400).json({ error: 'invalid room id' });
         const room = db.rooms[roomId];
         const post = findPost(roomId, postId);
         if (!room || !post) return res.status(404).json({ error: 'post not found' });
-        if (!text?.trim()) return res.status(400).json({ error: 'empty' });
+        if (typeof text !== 'string' || !text.trim() || text.length > 2000) {
+            return res.status(400).json({ error: 'empty' });
+        }
 
         const userComment = {
             id: uid('c'), author: 'user', authorName: room.persona?.name || settings.userPersonaName || null,
@@ -1656,14 +2061,18 @@ async function init(router) {
         const { roomId, postId, emoji } = req.body || {};
         const post = findPost(roomId, postId);
         if (!post) return res.status(404).json({ error: 'post not found' });
-        if (!emoji?.trim()) return res.status(400).json({ error: 'emoji is required' });
+        // emoji?.trim()은 null만 막고 숫자·객체는 TypeError로 500을 낸다.
+        if (typeof emoji !== 'string' || !emoji.trim()) {
+            return res.status(400).json({ error: 'emoji is required' });
+        }
+        const safeEmoji = emoji.trim().slice(0, 16);
         post.reactions ??= [];
-        const i = post.reactions.findIndex(r => r.author === 'user' && r.emoji === emoji);
+        const i = post.reactions.findIndex(r => r.author === 'user' && r.emoji === safeEmoji);
         if (i >= 0) post.reactions.splice(i, 1);
         else post.reactions.push({
             author: 'user',
             authorName: db.rooms[roomId]?.persona?.name || settings.userPersonaName || null,
-            emoji: emoji.trim().slice(0, 16),
+            emoji: safeEmoji,
             createdAt: Date.now(),
         });
         saveDb();
@@ -1675,7 +2084,10 @@ async function init(router) {
         const { roomId, postId, saved = true } = req.body || {};
         const post = findPost(roomId, postId);
         if (!post) return res.status(404).json({ error: 'post not found' });
-        post.saved = !!saved;
+        if (typeof saved !== 'boolean') {
+            return res.status(400).json({ error: 'invalid saved value' });
+        }
+        post.saved = saved;
         saveDb();
         res.json({ ok: true, saved: post.saved });
     });
@@ -1727,7 +2139,16 @@ async function init(router) {
         if (!allowedActions.has(what)) {
             return res.status(400).json({ error: 'invalid force action' });
         }
-        const rooms = roomId ? [db.rooms[roomId]].filter(Boolean) : Object.values(db.rooms);
+        // 검증이 없으면 "__proto__"·"constructor" 같은 값이 db.rooms 조회를 통과해
+        // Object.prototype을 방 객체로 오인하고, 이후 room.members 접근에서
+        // async 핸들러가 처리되지 않은 예외로 프로세스를 내릴 수 있다.
+        if (!validOptionalRoomId(roomId)) {
+            return res.status(400).json({ error: 'invalid room id' });
+        }
+        const rooms = roomId
+            ? [Object.prototype.hasOwnProperty.call(db.rooms, roomId) ? db.rooms[roomId] : null]
+                .filter(Boolean)
+            : Object.values(db.rooms);
         if (!rooms.length) return res.status(404).json({ error: 'room not found' });
         const guard = acquireProtectedAction('force', FORCE_COOLDOWN_MS);
         if (!guard.ok) return rejectProtectedAction(res, guard, '강제 실행');
@@ -1755,7 +2176,10 @@ async function init(router) {
                             }
                         }
                     }
-                    catch (e) { done.errors.push(`comment: ${e.message}`); }
+                    catch (e) {
+                        console.error('[chatlog] 강제 댓글 실패:', e);
+                        done.errors.push(`comment: ${sanitizeRuntimeError(e.message) || '실패'}`);
+                    }
                 }
             }
 
@@ -1780,7 +2204,12 @@ async function init(router) {
                         }, true);
                         if (result?.status === 'posted') done.cuts++;
                         else if (result?.status !== 'retrying') done.skipped++;
-                    } catch (e) { done.errors.push(`cut(${member.name}): ${e.message}`); }
+                    } catch (e) {
+                        console.error('[chatlog] 강제 게시 실패:', member.name, e);
+                        done.errors.push(
+                            `cut(${cleanDisplayName(member.name)}): ${sanitizeRuntimeError(e.message) || '실패'}`,
+                        );
+                    }
                 }
             }
 
@@ -1799,13 +2228,26 @@ async function init(router) {
                             done.comments += result?.commented ? 1 : 0;
                         }
                     }
-                    catch (e) { done.errors.push(`reaction: ${e.message}`); }
+                    catch (e) {
+                        console.error('[chatlog] 강제 반응 실패:', e);
+                        done.errors.push(`reaction: ${sanitizeRuntimeError(e.message) || '실패'}`);
+                    }
                 }
             }
             }
 
             saveDb();
             res.json(done);
+        } catch (error) {
+            // Express는 async 핸들러의 거부를 잡아주지 않는다.
+            // 여기서 삼키지 않으면 Node 기본 설정에서 프로세스가 종료된다.
+            console.error('[chatlog] 강제 실행 실패:', error);
+            if (!res.headersSent) {
+                res.status(500).json({
+                    ...done,
+                    error: sanitizeRuntimeError(error.message),
+                });
+            }
         } finally {
             guard.release();
         }
@@ -1814,7 +2256,14 @@ async function init(router) {
     // 다음 슬롯 시각을 지금으로 당기기 (생성은 다음 틱에)
     router.post('/force/now', (req, res) => {
         const { roomId } = req.body || {};
-        const rooms = roomId ? [db.rooms[roomId]].filter(Boolean) : Object.values(db.rooms);
+        // 검증이 없으면 r.nextSlotAt 대입이 Object.prototype을 오염시킨다.
+        if (!validOptionalRoomId(roomId)) {
+            return res.status(400).json({ error: 'invalid room id' });
+        }
+        const rooms = roomId
+            ? [Object.prototype.hasOwnProperty.call(db.rooms, roomId) ? db.rooms[roomId] : null]
+                .filter(Boolean)
+            : Object.values(db.rooms);
         if (!rooms.length) return res.status(404).json({ error: 'room not found' });
         const guard = acquireProtectedAction('force-now', FORCE_COOLDOWN_MS);
         if (!guard.ok) return rejectProtectedAction(res, guard, '다음 슬롯 즉시 실행');
@@ -1839,13 +2288,23 @@ async function init(router) {
         })));
     });
 
-    setInterval(tick, TICK_MS);
+    if (tickTimer) clearInterval(tickTimer);
+    tickTimer = setInterval(tick, TICK_MS);
     tick();
     console.log('[chatlog] 플러그인 시작됨');
 }
 
 module.exports = {
     init,
-    exit: () => {},
+    exit: () => {
+        if (tickTimer) {
+            clearInterval(tickTimer);
+            tickTimer = null;
+        }
+        protectedActions.clear();
+        requestBuckets.clear();
+        try { flushDbSave(); }
+        catch (error) { console.error('[chatlog] 종료 저장 실패:', error.message); }
+    },
     info: { id: 'chatlog', name: 'Chatlog', description: '시간 슬롯 기반 로그 + 캐릭터 지연 댓글' },
 };

@@ -46,6 +46,16 @@ if [ ! -f "$CONFIG" ]; then
     exit 1
 fi
 
+# 설치 경로나 config.yaml을 건드리기 전에 배포 파일 자체를 먼저 검사한다.
+if ! command -v node >/dev/null 2>&1; then
+    printf 'Node.js를 찾을 수 없습니다. SillyTavern 설치를 먼저 확인하세요.\n'
+    exit 1
+fi
+node --check "$SOURCE/index.js"
+node --check "$SOURCE/ai.js"
+node --check "$SOURCE/paths.js"
+node --check "$SOURCE/image-security.js"
+
 printf '\n챗로그 자동 게시 기능은 SillyTavern 서버 플러그인을 사용합니다.\n'
 printf '서버 플러그인은 일반 확장보다 권한이 크므로 신뢰하는 플러그인만 설치해야 합니다.\n'
 printf '기존 챗로그 데이터와 설정은 보존하고, 기존 서버 폴더는 백업합니다.\n\n'
@@ -112,11 +122,6 @@ if grep -Eq '^[[:space:]]*enableServerPlugins:' "$CONFIG"; then
 else
     printf '\nenableServerPlugins: true\n' >> "$CONFIG"
 fi
-
-node --check "$SOURCE/index.js"
-node --check "$SOURCE/ai.js"
-node --check "$SOURCE/paths.js"
-node --check "$SOURCE/image-security.js"
 
 printf '\n설치가 완료되었습니다.\n'
 printf '챗로그 설치 백업: %s\n' "$BACKUP_ROOT"

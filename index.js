@@ -1,10 +1,10 @@
 /**
  * 챗로그 클라이언트 확장
- * 배치: SillyTavern/public/scripts/extensions/third-party/chatlog/
+ * 배치: SillyTavern/data/<사용자 폴더>/extensions/chatlog/
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.9.2';
+const CHATLOG_VERSION = '0.9.5';
 const MAX_MANUAL_IMAGE_BYTES = 20 * 1024 * 1024;
 
 // ── 유틸 ──────────────────────────────────────────────────
@@ -24,9 +24,23 @@ async function api(pathname, body) {
 }
 
 const esc = (s) => $('<div>').text(s ?? '').html();
+const escAttr = (s) => String(s ?? '').replace(/[&<>"']/g, character => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+}[character]));
+const notify = (type, message) => {
+    const method = window.toastr?.[type];
+    if (typeof method === 'function') {
+        method.call(window.toastr, String(message ?? ''), undefined, { escapeHtml: true });
+        return;
+    }
+    if (type === 'error') window.alert(String(message ?? ''));
+};
 const showError = (message) => {
-    if (window.toastr?.error) window.toastr.error(message);
-    else window.alert(message);
+    notify('error', message);
 };
 
 function cleanDisplayName(value) {
@@ -657,7 +671,7 @@ async function loadRuntimeStatus() {
         $status.html([
             `<div><b>다음 판단</b><span>${esc(statusTime(status.nextSlotAt))}</span></div>`,
             `<div><b>마지막 성공</b><span>${esc(statusTime(status.lastSuccessAt))}${status.lastSuccess ? ` · ${esc(status.lastSuccess)}` : ''}</span></div>`,
-            `<div><b>마지막 오류</b><span class="${status.lastError ? 'error' : ''}" title="${esc(status.lastError || '')}">${status.lastError ? `${esc(statusTime(status.lastErrorAt))} · ${esc(compactRuntimeError(status.lastError))}` : '없음'}</span></div>`,
+            `<div><b>마지막 오류</b><span class="${status.lastError ? 'error' : ''}" title="${escAttr(status.lastError || '')}">${status.lastError ? `${esc(statusTime(status.lastErrorAt))} · ${esc(compactRuntimeError(status.lastError))}` : '없음'}</span></div>`,
             status.lastNotice
                 ? `<div><b>최근 안내</b><span>${esc(status.lastNotice)}</span></div>`
                 : '',
@@ -1016,7 +1030,7 @@ function renderRooms() {
 
         const $card = $(`
           <div class="chatlog-roomcard">
-            <div class="chatlog-roomthumb">${last?.image ? `<img src="${esc(last.image)}">` : '<span class="fa-solid fa-camera"></span>'}</div>
+            <div class="chatlog-roomthumb">${last?.image ? `<img src="${escAttr(last.image)}">` : '<span class="fa-solid fa-camera"></span>'}</div>
             <div class="chatlog-roommeta">
               <div class="chatlog-roomname">${esc(room.name)}</div>
               <div class="chatlog-roomsub">${room.members.length}명 · ${last ? timeLabel(last.createdAt) : '기록 없음'}</div>
@@ -1180,7 +1194,7 @@ function renderFeed(options = {}) {
         <span class="chatlog-date">${dateLabel}</span>
         <span class="chatlog-nav next fa-solid fa-chevron-right${di >= days.length - 1 ? ' off' : ''}"></span>
         <span class="chatlog-slotbtn persona fa-solid fa-user-pen" title="표시 페르소나 변경"></span>
-        <span class="chatlog-slotbtn relationships fa-solid fa-people-arrows${relationshipReady ? '' : ' stale'}" title="${esc(relationshipTitle)}"></span>
+        <span class="chatlog-slotbtn relationships fa-solid fa-people-arrows${relationshipReady ? '' : ' stale'}" title="${escAttr(relationshipTitle)}"></span>
         <span class="chatlog-slotbtn upload fa-solid fa-camera" title="올리기"></span>
         <span class="chatlog-slotbtn daylog fa-solid fa-clapperboard" title="하루로그"></span>
       </div>`);
@@ -1295,7 +1309,7 @@ function placeholderCard(name, avatar) {
     return $(`
       <div class="chatlog-cardwrap">
         <article class="chatlog-scard empty">
-          <div class="chatlog-sc-top"><img src="${avatar}"><span>${esc(name)}</span></div>
+          <div class="chatlog-sc-top"><img src="${escAttr(avatar)}"><span>${esc(name)}</span></div>
           <div class="chatlog-sc-center">
             <div class="chatlog-empty-label">아직 기록 전</div>
           </div>
@@ -1359,8 +1373,8 @@ function slotCard(room, p) {
         const rname = r.author === 'user'
             ? personaForRoom(room).name
             : characterName(room, r.author, r.authorName);
-        return `<span class="chatlog-react" title="${esc(rname)}">
-          <img class="chatlog-ravatar" src="${avatarUrl(r.author, room)}" alt="">
+        return `<span class="chatlog-react" title="${escAttr(rname)}">
+          <img class="chatlog-ravatar" src="${escAttr(avatarUrl(r.author, room))}" alt="">
           <span>${esc(r.emoji)}</span>
         </span>`;
     }).join('');
@@ -1370,7 +1384,7 @@ function slotCard(room, p) {
         const cname = characterName(room, c.author, c.authorName);
         return `
       <div class="chatlog-comment${c.read ? '' : ' unread'}">
-        <img class="chatlog-cavatar" src="${avatarUrl(c.author, room)}">
+        <img class="chatlog-cavatar" src="${escAttr(avatarUrl(c.author, room))}">
         <div class="chatlog-cbubble"><b>${esc(cname)}</b> ${esc(c.text)}</div>
       </div>`;
     }).join('');
@@ -1378,8 +1392,8 @@ function slotCard(room, p) {
     const $card = $(`
       <div class="chatlog-cardwrap">
         <article class="chatlog-scard${p.image ? ' has-photo' : ' empty'}">
-          ${p.image ? `<img class="chatlog-sc-bg" src="${esc(p.image)}">` : ''}
-          <div class="chatlog-sc-top"><img src="${avatarUrl(p.author, room)}"><span>${esc(name)}</span></div>
+          ${p.image ? `<img class="chatlog-sc-bg" src="${escAttr(p.image)}">` : ''}
+          <div class="chatlog-sc-top"><img src="${escAttr(avatarUrl(p.author, room))}"><span>${esc(name)}</span></div>
           <div class="chatlog-sc-center">
             <div class="chatlog-sc-time${p.image ? '' : ' dim'}">${hhmm(p.createdAt)}</div>
             ${p.text ? `<div class="chatlog-sc-cap">${esc(p.text)}</div>` : ''}
@@ -1431,7 +1445,7 @@ function slotCard(room, p) {
 
     $card.find('[data-act=save]').on('click', async () => {
         try { await downloadUrl(p.image, `chatlog_${dayKey(p.createdAt)}_${p.id}.png`); }
-        catch (e) { toastr?.error?.('저장 실패: ' + e.message); }
+        catch (e) { notify('error', '저장 실패: ' + e.message); }
     });
     $card.find('[data-act=keep]').on('click', async () => {
         await api('/save', { roomId: p.roomId, postId: p.id, saved: !p.saved });
@@ -1474,7 +1488,7 @@ function replySheet(room, post) {
             close();
             refresh();
         } catch (e) {
-            toastr?.error?.('전송 실패: ' + e.message);
+            notify('error', '전송 실패: ' + e.message);
         }
     });
 }
@@ -1565,7 +1579,7 @@ function uploadSheet(room) {
         try {
             $sheet.find('.chatlog-preview').html('<small>사진의 위치·촬영정보를 정리하는 중...</small>');
             imageData = await normalizeManualPhoto(f);
-            $sheet.find('.chatlog-preview').html(`<img src="${imageData}">`);
+            $sheet.find('.chatlog-preview').html(`<img src="${escAttr(imageData)}">`);
         } catch (error) {
             imageData = null;
             this.value = '';
@@ -1600,7 +1614,7 @@ function uploadSheet(room) {
             close();
             await refresh();
         } catch (e) {
-            toastr?.error?.('업로드 실패: ' + e.message);
+            notify('error', '업로드 실패: ' + e.message);
             $submit.removeClass('busy').text('올리기');
         }
     });
@@ -1682,7 +1696,7 @@ function dayLogView(room, selectedDay = dayKey(Date.now())) {
                 const author = characterName(room, p.author, p.authorName);
                 $photos.append(`
                   <div class="chatlog-cell">
-                    <img src="${esc(p.image)}">
+                    <img src="${escAttr(p.image)}">
                     <span class="chatlog-stamp">${esc(author)} · ${hhmm(p.createdAt)}</span>
                   </div>`);
             });
@@ -1785,7 +1799,7 @@ async function changeRoomDisplayPersona(room) {
         status: 'stale',
         displayPersona: { name: snapshot.name, avatar: snapshot.avatar },
     };
-    toastr?.success?.(`${persona.name}(으)로 표시합니다. 관계 설정 버튼에서 이 방의 관계를 다시 확인해 주세요.`);
+    notify('success', `${persona.name}(으)로 표시합니다. 관계 설정 버튼에서 이 방의 관계를 다시 확인해 주세요.`);
     render();
 }
 
@@ -1805,7 +1819,7 @@ async function refreshRoomRelationships(room, button = null, options = {}) {
         const summary = room.relationshipGraph?.summary
             ? ` ${room.relationshipGraph.summary.slice(0, 180)}`
             : '';
-        toastr?.success?.(`단톡 관계를 저장했어요.${summary}`);
+        notify('success', `단톡 관계를 저장했어요.${summary}`);
         render();
         return room.relationshipGraph;
     } catch (error) {
@@ -1814,7 +1828,7 @@ async function refreshRoomRelationships(room, button = null, options = {}) {
             status: 'error',
             lastError: error.message,
         };
-        toastr?.error?.(error.message);
+        notify('error', error.message);
         render();
         return null;
     } finally {
@@ -1866,9 +1880,9 @@ async function editRoomRelationships(room, options = {}) {
     for (const member of room.members || []) {
         const relation = saved.get(member.avatar) || {};
         const $row = $(`
-          <section class="chatlog-relation-row" data-avatar="${esc(member.avatar)}">
+          <section class="chatlog-relation-row" data-avatar="${escAttr(member.avatar)}">
             <div class="chatlog-relation-person">
-              <img src="${avatarUrl(member.avatar)}" alt="">
+              <img src="${escAttr(avatarUrl(member.avatar))}" alt="">
               <div><b>${esc(member.name)}</b><small>${esc(actor.name)}와의 관계</small></div>
             </div>
             <label>관계
@@ -1881,16 +1895,16 @@ async function editRoomRelationships(room, options = {}) {
               직접 입력한 관계
               <input class="chatlog-relation-label" maxlength="80"
                 placeholder="예: 보호자와 피보호자, 소꿉친구, 의형제"
-                value="${esc(relation.type === 'custom' ? relation.label || '' : '')}">
+                value="${escAttr(relation.type === 'custom' ? relation.label || '' : '')}">
             </label>
             <label>${esc(member.name)} → ${esc(actor.name)} 호칭
-              <input class="chatlog-member-call" maxlength="80" placeholder="예: 이름, 선배, 자기" value="${esc(relation.memberCallsPersona || '')}">
+              <input class="chatlog-member-call" maxlength="80" placeholder="예: 이름, 선배, 자기" value="${escAttr(relation.memberCallsPersona || '')}">
             </label>
             <label>${esc(actor.name)} → ${esc(member.name)} 호칭
-              <input class="chatlog-persona-call" maxlength="80" placeholder="예: 이름, 오빠, 여보" value="${esc(relation.personaCallsMember || '')}">
+              <input class="chatlog-persona-call" maxlength="80" placeholder="예: 이름, 오빠, 여보" value="${escAttr(relation.personaCallsMember || '')}">
             </label>
             <label>금지 호칭·관계 표현
-              <input class="chatlog-forbidden" maxlength="160" placeholder="예: 꼬맹이, 여친, 자기" value="${esc(relation.forbiddenTerms || '')}">
+              <input class="chatlog-forbidden" maxlength="160" placeholder="예: 꼬맹이, 여친, 자기" value="${escAttr(relation.forbiddenTerms || '')}">
             </label>
             <label>관계 메모
               <textarea class="chatlog-relation-note" rows="2" maxlength="300" placeholder="다른 멤버들도 알고 있어야 할 사실만">${esc(relation.note || '')}</textarea>
@@ -1956,7 +1970,7 @@ async function editRoomRelationships(room, options = {}) {
             toastr?.success?.('이 방의 관계를 직접 고정했어요.');
             render();
         } catch (error) {
-            toastr?.error?.('관계 저장 실패: ' + error.message);
+            notify('error', '관계 저장 실패: ' + error.message);
             $button.removeClass('busy').text('관계 저장');
         }
     });
@@ -1976,9 +1990,9 @@ async function createRoomFlow() {
     const $list = $picker.find('.chatlog-charpick');
     chars.forEach(ch => {
         const $row = $(`
-          <label class="chatlog-charrow" data-search="${esc(String(ch.name || '').toLowerCase())}">
-            <input type="checkbox" value="${esc(ch.avatar)}">
-            <img src="${avatarUrl(ch.avatar)}"><span>${esc(ch.name)}</span>
+          <label class="chatlog-charrow" data-search="${escAttr(String(ch.name || '').toLowerCase())}">
+            <input type="checkbox" value="${escAttr(ch.avatar)}">
+            <img src="${escAttr(avatarUrl(ch.avatar))}"><span>${esc(ch.name)}</span>
           </label>`);
         $list.append($row);
     });
@@ -2618,14 +2632,20 @@ jQuery(async () => {
                 imageModel: readImageModel(),
             });
             const r = await api('/test/image', {});
-            $r.html(`성공 — <a href="${r.path}" target="_blank">이미지 보기</a>`);
+            const $link = $('<a>', {
+                href: String(r.path || ''),
+                target: '_blank',
+                rel: 'noopener noreferrer',
+                text: '이미지 보기',
+            });
+            $r.empty().append(document.createTextNode('성공 — '), $link);
         } catch (e) {
             $r.text('실패: ' + e.message);
         }
     });
     $('#chatlog-reload').on('click', async () => {
         try { await api('/reload', {}); toastr?.success?.('서버 코드 리로드 완료'); }
-        catch (e) { toastr?.error?.('리로드 실패: ' + e.message); }
+        catch (e) { notify('error', '리로드 실패: ' + e.message); }
     });
     $('#chatlog-status-refresh').on('click', loadRuntimeStatus);
     $('#chatlog-cleannow').on('click', async () => {
