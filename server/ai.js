@@ -12,6 +12,36 @@ const ST_ROOT = findSillyTavernRoot();
 const DATA_ROOT = path.resolve(ST_ROOT, 'data');
 const PUBLIC_ROOT = path.resolve(ST_ROOT, 'public');
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.avif']);
+const GOOGLE_OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const VERTEX_REGION_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
+
+function normalizeVertexRegion(value) {
+    const region = String(value || 'global').trim().toLowerCase();
+    if (!VERTEX_REGION_PATTERN.test(region)) {
+        throw new Error(`Vertex 리전 형식이 올바르지 않습니다 (${region || '빈 값'})`);
+    }
+    return region;
+}
+
+function assertGoogleVertexUrl(value) {
+    let parsed;
+    try {
+        parsed = new URL(value);
+    } catch {
+        throw new Error('Vertex 요청 주소를 만들 수 없습니다');
+    }
+    const host = parsed.hostname.toLowerCase();
+    const isGoogleVertexHost = host === 'aiplatform.googleapis.com'
+        || host.endsWith('-aiplatform.googleapis.com');
+    if (parsed.protocol !== 'https:'
+        || parsed.username
+        || parsed.password
+        || parsed.port
+        || !isGoogleVertexHost) {
+        throw new Error(`허용되지 않은 Vertex 요청 주소입니다 (${host || '알 수 없음'})`);
+    }
+    return parsed.toString();
+}
 
 function isPathInside(root, candidate) {
     const relative = path.relative(root, candidate);
@@ -185,8 +215,6 @@ function resolveProfileApi(settings, profileName, kind = 'text') {
         name: profile.name,
         source,
         model: profile.model,
-        apiKey: secretValue(secrets, `api_key_${source}`, secretId),
-        customUrl: profile['api-url'] || profile['custom-url'] || profile.reverse_proxy || '',
         secretId,
     };
 }
@@ -220,10 +248,17 @@ function resolveTextApi(settings) {
         const activeApi = activeName
             ? resolveProfileApi(settings, activeName)
             : null;
-        if (activeApi) return activeApi;
+        // 챗로그는 Vertex 전용이다. 사용자가 ST에서 Claude·GLM 등의 프로필로
+        // 잠시 전환해도 그 주소로 챗로그 정보를 보내지 않고 저장된 Vertex
+        // 프로필로 폴백한다.
+        if (activeApi?.source === 'vertexai') return activeApi;
     }
-    // 현재 활성 프로필을 읽지 못하면 챗로그에 마지막으로 저장된 프로필로 폴백한다.
-    return resolveProfileApi(settings, settings.profileName);
+    // 현재 활성 프로필을 읽지 못하면 챗로그에 마지막으로 저장된 Vertex
+    // 프로필로 폴백한다. 구버전 설정에 Claude·GLM 이름이 남아 있더라도
+    // 절대 해당 주소를 호출하지 않고 첫 번째 Vertex 프로필을 다시 찾는다.
+    const savedApi = resolveProfileApi(settings, settings.profileName);
+    if (savedApi?.source === 'vertexai') return savedApi;
+    return resolveProfileApi(settings, '', 'image');
 }
 
 function resolveImageApi(settings) {
@@ -462,18 +497,21 @@ function googleUrl({
     projectId,
     region = 'global',
 }) {
-    const location = region || 'global';
+    const location = normalizeVertexRegion(region);
     const modelPath = `${encodeURIComponent(model)}:generateContent`;
+    let url;
     if (projectId) {
-        return `https://aiplatform.googleapis.com/v1/projects/${encodeURIComponent(projectId)}`
+        url = `https://aiplatform.googleapis.com/v1/projects/${encodeURIComponent(projectId)}`
             + `/locations/${encodeURIComponent(location)}/publishers/google/models/`
             + `${modelPath}?key=${encodeURIComponent(apiKey)}`;
+    } else {
+        const host = location === 'global'
+            ? 'aiplatform.googleapis.com'
+            : `${location}-aiplatform.googleapis.com`;
+        url = `https://${host}/v1/publishers/google/models/`
+            + `${modelPath}?key=${encodeURIComponent(apiKey)}`;
     }
-    const host = location === 'global'
-        ? 'aiplatform.googleapis.com'
-        : `${location}-aiplatform.googleapis.com`;
-    return `https://${host}/v1/publishers/google/models/`
-        + `${modelPath}?key=${encodeURIComponent(apiKey)}`;
+    return assertGoogleVertexUrl(url);
 }
 
 async function callGoogle(cfg, body) {
@@ -509,7 +547,9 @@ async function getVertexAccessToken(serviceAccount) {
     if (cached && cached.expiresAt > Date.now() + 60_000) return cached.token;
 
     const issuedAt = Math.floor(Date.now() / 1000);
-    const tokenUri = serviceAccount.token_uri || 'https://oauth2.googleapis.com/token';
+    // Vertex 서비스 계정의 OAuth 토큰은 Google 공식 주소로만 요청한다.
+    // 프로필 JSON의 임의 token_uri 값으로 인증 정보가 전송되지 않게 고정한다.
+    const tokenUri = GOOGLE_OAUTH_TOKEN_URL;
     const header = toBase64Url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
     const claim = toBase64Url(JSON.stringify({
         iss: serviceAccount.client_email,
@@ -544,13 +584,13 @@ async function getVertexAccessToken(serviceAccount) {
 
 function vertexProfileUrl({ projectId, region = 'global', model }) {
     if (!projectId) throw new Error('연결 프로필의 Vertex 프로젝트 ID를 찾을 수 없음');
-    const location = region || 'global';
+    const location = normalizeVertexRegion(region);
     const host = location === 'global'
         ? 'aiplatform.googleapis.com'
         : `${location}-aiplatform.googleapis.com`;
-    return `https://${host}/v1/projects/${encodeURIComponent(projectId)}`
+    return assertGoogleVertexUrl(`https://${host}/v1/projects/${encodeURIComponent(projectId)}`
         + `/locations/${encodeURIComponent(location)}/publishers/google/models/`
-        + `${encodeURIComponent(model)}:generateContent`;
+        + `${encodeURIComponent(model)}:generateContent`);
 }
 
 async function callVertexProfile(api, body) {
@@ -580,11 +620,17 @@ async function callVertexProfile(api, body) {
 
 // ── 프로바이더별 호출 ─────────────────────────────────────
 const lastDebug = [];
+let debugEnabled = false;
 function pushDebug(entry) {
+    if (!debugEnabled) return;
     lastDebug.push({ time: new Date().toLocaleTimeString('ko-KR'), ...entry });
     if (lastDebug.length > 10) lastDebug.shift();
 }
 function getDebug() { return lastDebug; }
+function setDebugEnabled(enabled) {
+    debugEnabled = enabled === true;
+    if (!debugEnabled) lastDebug.length = 0;
+}
 
 function geminiGenerationConfig(model, wantJson = false) {
     const name = String(model || '').toLowerCase();
@@ -637,44 +683,12 @@ async function callGemini(api, { system, user, image, json: wantJson }) {
     return text;
 }
 
-async function callOpenAiCompatible(api, { system, user, image }) {
-    const content = [{ type: 'text', text: user }];
-    if (image) {
-        content.push({
-            type: 'image_url',
-            image_url: { url: `data:${image.mime};base64,${image.data}` },
-        });
-    }
-
-    const base = api.customUrl || 'https://api.openai.com/v1';
-    const res = await fetch(`${base.replace(/\/$/, '')}/chat/completions`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${api.apiKey}`,
-        },
-        body: JSON.stringify({
-            model: api.model,
-            messages: [
-                { role: 'system', content: system },
-                { role: 'user', content },
-            ],
-            temperature: 1.0,
-            max_tokens: 200,
-        }),
-    });
-    if (!res.ok) throw new Error(`openai ${res.status}: ${await res.text()}`);
-    const json = await res.json();
-    return json?.choices?.[0]?.message?.content || '';
-}
-
 async function callText(api, payload) {
     if (!api) throw new Error('연결 프로필을 찾을 수 없음');
-    if (api.source === 'vertexai') {
-        return callGemini(api, payload);
+    if (api.source !== 'vertexai') {
+        throw new Error(`챗로그는 Vertex AI 연결 프로필만 지원합니다 (${api.name || api.source})`);
     }
-    if (!api.apiKey) throw new Error(`연결 프로필 "${api.name}"의 API 키를 찾을 수 없음`);
-    return callOpenAiCompatible(api, payload);
+    return callGemini(api, payload);
 }
 
 // ── JSON 추출 (코드펜스/잡소리에 강함) ──────────────────────
@@ -2377,6 +2391,8 @@ async function generateImage(
 module.exports = {
     safeUserHandle,
     userDataDir,
+    normalizeVertexRegion,
+    assertGoogleVertexUrl,
     resolveProfileApi,
     activeProfileName,
     resolveTextApi,
@@ -2390,6 +2406,7 @@ module.exports = {
     readPersonaAvatar,
     readRecentChat,
     getDebug,
+    setDebugEnabled,
     geminiGenerationConfig,
     extractJson,
     generateComment,

@@ -6,6 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const { findSillyTavernRoot } = require('./paths');
+const { stripImagePrivacyMetadata } = require('./image-security');
 
 // ai.js 는 핫 리로드 대상 — 캐시를 비우면 서버 재시작 없이 새 코드가 먹는다
 let _ai = require('./ai');
@@ -21,6 +22,10 @@ const SETTINGS_PATH = path.join(__dirname, 'settings.json');
 const TICK_MS = 60 * 1000;
 const MISSED_SLOT_GRACE_MS = 30 * 60 * 1000;
 const RETRY_DELAYS_MS = [10, 30, 60].map(minutes => minutes * 60 * 1000);
+const TEST_IMAGE_COOLDOWN_MS = 30 * 1000;
+const FORCE_COOLDOWN_MS = 30 * 1000;
+const RELOAD_COOLDOWN_MS = 5 * 1000;
+const CLEANUP_COOLDOWN_MS = 10 * 1000;
 
 // 심볼릭 링크 설치에서도 실제 server.js가 있는 ST 루트를 찾는다.
 const ST_ROOT = findSillyTavernRoot();
@@ -64,7 +69,64 @@ let settings = {
     autoCleanup: false,       // 지난 날 이미지/게시물 자동 삭제
     cleanupAfterDays: 1,      // 며칠 지난 것부터 지울지
     keepSaved: true,          // 저장 표시한 건 남기기
+    debugEnabled: false,      // 상세 AI 응답은 사용자가 명시적으로 켰을 때만 공개
 };
+
+const protectedActions = new Map();
+
+function acquireProtectedAction(key, cooldownMs) {
+    const now = Date.now();
+    const previous = protectedActions.get(key);
+    if (previous?.running) {
+        return { ok: false, reason: 'running', retryAfterMs: Math.max(1000, cooldownMs) };
+    }
+    if (previous?.nextAllowedAt > now) {
+        return {
+            ok: false,
+            reason: 'cooldown',
+            retryAfterMs: previous.nextAllowedAt - now,
+        };
+    }
+
+    protectedActions.set(key, { running: true, nextAllowedAt: 0 });
+    let released = false;
+    return {
+        ok: true,
+        release() {
+            if (released) return;
+            released = true;
+            protectedActions.set(key, {
+                running: false,
+                nextAllowedAt: Date.now() + cooldownMs,
+            });
+        },
+    };
+}
+
+function rejectProtectedAction(res, guard, label) {
+    const retryAfterSeconds = Math.max(1, Math.ceil(guard.retryAfterMs / 1000));
+    res.set('Retry-After', String(retryAfterSeconds));
+    return res.status(429).json({
+        error: guard.reason === 'running'
+            ? `${label} 작업이 이미 진행 중입니다`
+            : `${label} 작업은 ${retryAfterSeconds}초 뒤에 다시 실행할 수 있습니다`,
+        retryAfterSeconds,
+    });
+}
+
+function requestMatchesServerOrigin(req) {
+    const origin = String(req.get?.('origin') || '').trim();
+    if (!origin) return true; // curl·로컬 서버 호출은 ST 인증 계층에 맡긴다.
+    try {
+        const originHost = new URL(origin).host.toLowerCase();
+        const forwardedHost = String(req.get?.('x-forwarded-host') || '')
+            .split(',')[0].trim().toLowerCase();
+        const requestHost = forwardedHost || String(req.get?.('host') || '').trim().toLowerCase();
+        return !!requestHost && originHost === requestHost;
+    } catch {
+        return false;
+    }
+}
 
 function loadJson(p, fallback) {
     try { return JSON.parse(fs.readFileSync(p, 'utf-8')); } catch { return fallback; }
@@ -106,6 +168,7 @@ function loadAll() {
     for (const job of db.jobs) job.attempts ??= 0;
     settings = { ...settings, ...loadJson(SETTINGS_PATH, {}) };
     secureSettingsUserHandle();
+    ai.setDebugEnabled(settings.debugEnabled === true);
     // v0.7.12: 텍스트는 ST 프로필, 이미지는 별도 Vertex Express 설정만 사용한다.
     settings.textMode = 'profile';
     settings.imageProvider = 'vertex';
@@ -232,6 +295,12 @@ function statusPayload() {
 }
 
 const uid = (p) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+function validRecordId(value, prefix) {
+    const normalized = String(value || '');
+    return normalized.length <= 128
+        && normalized.startsWith(`${prefix}_`)
+        && /^[a-z0-9_]+$/i.test(normalized);
+}
 const rand = (min, max) => min + Math.random() * (max - min);
 const COMMENT_INTENTS = ['detail', 'tease', 'question', 'opinion', 'practical', 'callback', 'minimal'];
 const SHARED_SCENE_TEMPLATES = [
@@ -844,6 +913,7 @@ function decodeManualImage(imageBase64, mimeHint) {
 
 function saveManualImage(imageBase64, mimeHint) {
     const { buffer, type } = decodeManualImage(imageBase64, mimeHint);
+    const sanitized = stripImagePrivacyMetadata(buffer, type);
     fs.mkdirSync(CHATLOG_IMAGE_DIR, { recursive: true });
     const realPublicRoot = fs.realpathSync(PUBLIC_DIR);
     const realImageRoot = fs.realpathSync(CHATLOG_IMAGE_DIR);
@@ -852,7 +922,7 @@ function saveManualImage(imageBase64, mimeHint) {
     }
     const filename = `${uid('post')}.${type.ext}`;
     const absolutePath = path.join(realImageRoot, filename);
-    fs.writeFileSync(absolutePath, buffer, { flag: 'wx' });
+    fs.writeFileSync(absolutePath, sanitized.buffer, { flag: 'wx' });
     return `/user/images/chatlog/${filename}`;
 }
 
@@ -1072,6 +1142,20 @@ async function tick() {
 async function init(router) {
     loadAll();
 
+    // SillyTavern의 로그인·CSRF 보호에 더해, 브라우저에서 다른 출처가
+    // 챗로그 관리 API를 호출하는 요청을 한 번 더 거부한다.
+    router.use((req, res, next) => {
+        if (!requestMatchesServerOrigin(req)) {
+            return res.status(403).json({ error: 'cross-origin request denied' });
+        }
+        if (req.method !== 'GET'
+            && req.method !== 'HEAD'
+            && !req.is?.('application/json')) {
+            return res.status(415).json({ error: 'application/json 요청만 허용됩니다' });
+        }
+        next();
+    });
+
     router.get('/state', (req, res) => res.json({ rooms: db.rooms, posts: db.posts }));
     router.get('/status', (req, res) => res.json(statusPayload()));
 
@@ -1087,16 +1171,69 @@ async function init(router) {
                 return res.status(400).json({ error: 'invalid userHandle' });
             }
         }
+        for (const key of ['profileName', 'imageProfileName']) {
+            const profileName = String(body[key] || '').trim();
+            if (!profileName) continue;
+            const profile = ai.resolveProfileApi(settings, profileName, key === 'imageProfileName' ? 'image' : 'text');
+            if (!profile || profile.source !== 'vertexai') {
+                return res.status(400).json({
+                    error: `${key === 'imageProfileName' ? '이미지' : '텍스트'} 연결은 Vertex AI 프로필만 사용할 수 있습니다`,
+                });
+            }
+        }
+        if (body.imageModel !== undefined) {
+            const imageModel = String(body.imageModel || '').trim();
+            if (!/^[a-z0-9][a-z0-9._-]{0,127}$/i.test(imageModel)
+                || /-preview(?:-|$)/i.test(imageModel)) {
+                return res.status(400).json({ error: 'invalid image model' });
+            }
+        }
+        const numericRanges = {
+            selfiePhotoChance: [0, 100],
+            partnerSelfieChance: [0, 100],
+            roomMeetupChance: [0, 100],
+            sharedScenePostChance: [0, 100],
+            characterCommentChance: [0, 100],
+            commentDelayMinMin: [0, 600],
+            commentDelayMaxMin: [1, 600],
+            cleanupAfterDays: [0, 30],
+        };
+        for (const [key, [min, max]] of Object.entries(numericRanges)) {
+            if (body[key] === undefined) continue;
+            const value = Number(body[key]);
+            if (!Number.isFinite(value) || value < min || value > max) {
+                return res.status(400).json({ error: `invalid ${key}` });
+            }
+        }
+        for (const key of ['followActiveProfile', 'autoCleanup', 'keepSaved', 'debugEnabled']) {
+            if (body[key] !== undefined && typeof body[key] !== 'boolean') {
+                return res.status(400).json({ error: `invalid ${key}` });
+            }
+        }
+        if (body.userPersonaName !== undefined
+            && String(body.userPersonaName).length > 120) {
+            return res.status(400).json({ error: 'invalid userPersonaName' });
+        }
         for (const k of Object.keys(settings)) {
             if (body[k] === undefined) continue;
-            if (k === 'imageApiKey' && body[k] === '••••') continue; // 마스킹된 값은 무시
+            // 구버전 직접 입력 인증값은 더 이상 API로 변경하지 않는다.
+            if (['imageApiKey', 'imageProjectId', 'imageRegion'].includes(k)) continue;
             if (k === 'userHandle') {
                 settings[k] = String(body[k]).trim();
+                continue;
+            }
+            if (k === 'textMode') {
+                settings[k] = 'profile';
+                continue;
+            }
+            if (k === 'imageProvider') {
+                settings[k] = 'vertex';
                 continue;
             }
             settings[k] = body[k];
         }
         saveSettings();
+        ai.setDebugEnabled(settings.debugEnabled === true);
         res.json({ ok: true });
     });
 
@@ -1108,12 +1245,21 @@ async function init(router) {
             persona = null,
             memberPersonas = {},
         } = req.body || {};
+        if (typeof name !== 'string' || !name.trim() || name.length > 100) {
+            return res.status(400).json({ error: 'invalid room name' });
+        }
+        if (!Array.isArray(members) || members.length < 1 || members.length > 100) {
+            return res.status(400).json({ error: 'invalid room members' });
+        }
+        if (!schedule || typeof schedule !== 'object' || Array.isArray(schedule)) {
+            return res.status(400).json({ error: 'invalid room schedule' });
+        }
         const normalizedMembers = members.map(member => ({
             ...member,
             name: cleanDisplayName(member.name || member.avatar),
         }));
         const room = {
-            id: uid('room'), name, members: normalizedMembers, persona, memberPersonas,
+            id: uid('room'), name: name.trim(), members: normalizedMembers, persona, memberPersonas,
             createdAt: Date.now(), paused: false,
             slotHistory: [],
             sharedScenes: [],
@@ -1148,6 +1294,38 @@ async function init(router) {
         const { roomId, ...patch } = req.body || {};
         const room = db.rooms[roomId];
         if (!room) return res.status(404).json({ error: 'room not found' });
+        const allowedKeys = new Set([
+            'name',
+            'members',
+            'persona',
+            'memberPersonas',
+            'schedule',
+            'paused',
+        ]);
+        const rejectedKey = Object.keys(patch).find(key => !allowedKeys.has(key));
+        if (rejectedKey) {
+            return res.status(400).json({ error: `room field not allowed: ${rejectedKey}` });
+        }
+        if (patch.name !== undefined
+            && (typeof patch.name !== 'string' || !patch.name.trim() || patch.name.length > 100)) {
+            return res.status(400).json({ error: 'invalid room name' });
+        }
+        if (patch.members !== undefined
+            && (!Array.isArray(patch.members)
+                || patch.members.length < 1
+                || patch.members.length > 100)) {
+            return res.status(400).json({ error: 'invalid room members' });
+        }
+        if (patch.schedule !== undefined
+            && (!patch.schedule
+                || typeof patch.schedule !== 'object'
+                || Array.isArray(patch.schedule))) {
+            return res.status(400).json({ error: 'invalid room schedule' });
+        }
+        if (patch.paused !== undefined && typeof patch.paused !== 'boolean') {
+            return res.status(400).json({ error: 'invalid paused value' });
+        }
+        if (patch.name !== undefined) patch.name = patch.name.trim();
         const personaBefore = JSON.stringify(room.persona || null);
         const identityBefore = JSON.stringify({
             persona: room.persona || null,
@@ -1311,20 +1489,30 @@ async function init(router) {
         res.json({ ok: true });
     });
 
-    // 최근 AI 응답 원문 (디버그)
-    router.get('/debug', (req, res) => res.json(ai.getDebug()));
+    // 최근 AI 응답 원문은 사용자가 명시적으로 디버그 모드를 켠 경우에만 공개한다.
+    router.get('/debug', (req, res) => {
+        if (settings.debugEnabled !== true) {
+            return res.status(403).json({ error: '디버그 모드가 꺼져 있습니다' });
+        }
+        res.json(ai.getDebug());
+    });
 
     // 핫 리로드 — ai.js 와 settings.json 을 다시 읽는다 (서버 재시작 불필요)
     router.post('/reload', (req, res) => {
+        const guard = acquireProtectedAction('reload', RELOAD_COOLDOWN_MS);
+        if (!guard.ok) return rejectProtectedAction(res, guard, '리로드');
         try {
             reloadAi();
             settings = { ...settings, ...loadJson(SETTINGS_PATH, {}) };
             secureSettingsUserHandle();
+            ai.setDebugEnabled(settings.debugEnabled === true);
             console.log('[chatlog] 리로드 완료');
             res.json({ ok: true, reloaded: ['ai.js', 'settings.json'] });
         } catch (e) {
             console.error('[chatlog] 리로드 실패:', e.message);
             res.status(500).json({ ok: false, error: e.message });
+        } finally {
+            guard.release();
         }
     });
 
@@ -1411,6 +1599,8 @@ async function init(router) {
 
     // 이미지 생성 테스트
     router.post('/test/image', async (req, res) => {
+        const guard = acquireProtectedAction('test-image', TEST_IMAGE_COOLDOWN_MS);
+        if (!guard.ok) return rejectProtectedAction(res, guard, '이미지 테스트');
         try {
             const p = await ai.generateImage(
                 settings,
@@ -1426,6 +1616,8 @@ async function init(router) {
             res.json({ ok: true, path: p });
         } catch (e) {
             res.status(500).json({ ok: false, error: e.message });
+        } finally {
+            guard.release();
         }
     });
 
@@ -1491,35 +1683,59 @@ async function init(router) {
     // 게시물 삭제
     router.post('/delete', (req, res) => {
         const { roomId, postId } = req.body || {};
-        const list = db.posts[roomId] || [];
-        const i = list.findIndex(p => p.id === postId);
+        if (!validRecordId(roomId, 'room') || !validRecordId(postId, 'post')) {
+            return res.status(400).json({ error: 'invalid room or post id' });
+        }
+        const room = db.rooms[roomId];
+        if (!room) return res.status(404).json({ error: 'room not found' });
+        const list = db.posts[roomId];
+        if (!Array.isArray(list)) return res.status(404).json({ error: 'post not found' });
+        const i = list.findIndex(post => post.id === postId && post.roomId === roomId);
         if (i < 0) return res.status(404).json({ error: 'post not found' });
+        if (list[i].image && !resolveChatlogImage(list[i].image, true)) {
+            return res.status(409).json({ error: '게시물 이미지 경로 검증에 실패해 삭제를 중단했습니다' });
+        }
         removeImageFile(list[i].image);
         list.splice(i, 1);
+        db.jobs = db.jobs.filter(job => !(job.roomId === roomId && job.postId === postId));
         saveDb();
         res.json({ ok: true });
     });
 
     // 수동 정리
     router.post('/cleanup', (req, res) => {
+        const guard = acquireProtectedAction('cleanup', CLEANUP_COOLDOWN_MS);
+        if (!guard.ok) return rejectProtectedAction(res, guard, '수동 정리');
         const force = req.body?.force;
         const prev = settings.autoCleanup;
-        if (force) settings.autoCleanup = true;
-        runCleanup();
-        settings.autoCleanup = prev;
-        res.json({ ok: true });
+        try {
+            if (force) settings.autoCleanup = true;
+            runCleanup();
+            settings.autoCleanup = prev;
+            res.json({ ok: true });
+        } finally {
+            settings.autoCleanup = prev;
+            guard.release();
+        }
     });
 
     // ── 강제 실행 ─────────────────────────────────────────
     // what: 'comments' | 'reactions' | 'cut' | 'all'
     router.post('/force', async (req, res) => {
         const { roomId, what = 'all' } = req.body || {};
+        const allowedActions = new Set(['comments', 'reactions', 'cut', 'all']);
+        if (!allowedActions.has(what)) {
+            return res.status(400).json({ error: 'invalid force action' });
+        }
         const rooms = roomId ? [db.rooms[roomId]].filter(Boolean) : Object.values(db.rooms);
         if (!rooms.length) return res.status(404).json({ error: 'room not found' });
+        const guard = acquireProtectedAction('force', FORCE_COOLDOWN_MS);
+        if (!guard.ok) return rejectProtectedAction(res, guard, '강제 실행');
 
         const done = { comments: 0, reactions: 0, cuts: 0, skipped: 0, errors: [] };
 
-        for (const room of rooms) {
+        try {
+            for (const room of rooms) {
             // 1. 대기 중인 댓글 작업 즉시 실행
             if (what === 'all' || what === 'comments') {
                 const pending = db.jobs.filter(job => job.roomId === room.id
@@ -1586,19 +1802,29 @@ async function init(router) {
                     catch (e) { done.errors.push(`reaction: ${e.message}`); }
                 }
             }
-        }
+            }
 
-        saveDb();
-        res.json(done);
+            saveDb();
+            res.json(done);
+        } finally {
+            guard.release();
+        }
     });
 
     // 다음 슬롯 시각을 지금으로 당기기 (생성은 다음 틱에)
     router.post('/force/now', (req, res) => {
         const { roomId } = req.body || {};
         const rooms = roomId ? [db.rooms[roomId]].filter(Boolean) : Object.values(db.rooms);
-        rooms.forEach(r => { r.nextSlotAt = Date.now(); });
-        saveDb();
-        res.json({ ok: true, rooms: rooms.length });
+        if (!rooms.length) return res.status(404).json({ error: 'room not found' });
+        const guard = acquireProtectedAction('force-now', FORCE_COOLDOWN_MS);
+        if (!guard.ok) return rejectProtectedAction(res, guard, '다음 슬롯 즉시 실행');
+        try {
+            rooms.forEach(r => { r.nextSlotAt = Date.now(); });
+            saveDb();
+            res.json({ ok: true, rooms: rooms.length });
+        } finally {
+            guard.release();
+        }
     });
 
     // 대기 중인 작업 확인

@@ -170,6 +170,8 @@ if ($LASTEXITCODE -ne 0) { throw "server/index.js 문법 검사에 실패했습�
 if ($LASTEXITCODE -ne 0) { throw "server/ai.js 문법 검사에 실패했습니다." }
 & node --check (Join-Path $Source "paths.js")
 if ($LASTEXITCODE -ne 0) { throw "server/paths.js 문법 검사에 실패했습니다." }
+& node --check (Join-Path $Source "image-security.js")
+if ($LASTEXITCODE -ne 0) { throw "server/image-security.js 문법 검사에 실패했습니다." }
 
 Write-Host ""
 Write-Host "설치가 완료되었습니다."

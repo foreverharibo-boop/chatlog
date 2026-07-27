@@ -116,6 +116,7 @@ fi
 node --check "$SOURCE/index.js"
 node --check "$SOURCE/ai.js"
 node --check "$SOURCE/paths.js"
+node --check "$SOURCE/image-security.js"
 
 printf '\n설치가 완료되었습니다.\n'
 printf '챗로그 설치 백업: %s\n' "$BACKUP_ROOT"

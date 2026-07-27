@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.9.0';
+const CHATLOG_VERSION = '0.9.2';
 const MAX_MANUAL_IMAGE_BYTES = 20 * 1024 * 1024;
 
 // ── 유틸 ──────────────────────────────────────────────────
@@ -263,7 +263,7 @@ const SETTINGS_HTML = `
           <input id="chatlog-textmode" type="hidden" value="profile">
         </div>
       </div>
-      <small class="chatlog-setting-help">게시 판단·댓글·반응은 선택한 프로필의 모델과 인증을 사용합니다.</small>
+      <small class="chatlog-setting-help">게시 판단·댓글·반응은 선택한 Vertex AI 프로필의 모델과 인증만 사용합니다.</small>
 
       <div id="chatlog-profile-field" class="chatlog-setting-field">
         <label for="chatlog-profile">연결 프로필</label>
@@ -276,7 +276,7 @@ const SETTINGS_HTML = `
         <span class="chatlog-setting-label">자동 연결</span>
         <label class="checkbox_label chatlog-profile-follow chatlog-setting-control">
           <input id="chatlog-follow-profile" type="checkbox">
-          <span>현재 선택 프로필 사용</span>
+          <span>현재 선택 Vertex 프로필 사용</span>
         </label>
       </div>
       <small id="chatlog-profile-count" class="chatlog-setting-help"></small>
@@ -416,6 +416,13 @@ const SETTINGS_HTML = `
 
       <div class="chatlog-setting-section">자동 실행 상태</div>
       <div id="chatlog-runtime-status" class="chatlog-runtime-status">불러오는 중...</div>
+      <div class="chatlog-setting-field">
+        <span class="chatlog-setting-label">상세 디버그</span>
+        <label class="checkbox_label chatlog-setting-control">
+          <input id="chatlog-debug-enabled" type="checkbox"><span>최근 AI 응답 기록 허용</span>
+        </label>
+      </div>
+      <small class="chatlog-setting-help">기본값은 꺼짐입니다. 오류를 확인할 때만 켜고, 확인 후 다시 끄면 메모리에 보관된 상세 응답도 즉시 지웁니다.</small>
       <div class="chatlog-setting-tools">
         <button id="chatlog-status-refresh" type="button" class="menu_button chatlog-mini-button">상태 새로고침</button>
       </div>
@@ -478,7 +485,8 @@ let savedProfileName = '';
 let savedImageProfileName = '';
 
 function refreshProfileSelect(selected) {
-    const profiles = getProfiles();
+    const allProfiles = getProfiles();
+    const profiles = allProfiles.filter(isVertexProfile);
     const $sel = $('#chatlog-profile');
 
     if (selected !== undefined) savedProfileName = selected || '';
@@ -488,12 +496,20 @@ function refreshProfileSelect(selected) {
     profiles.forEach(p => $sel.append($('<option>').val(p.name).text(p.name)));
 
     // 목록에 아직 없어도 저장된 이름은 옵션으로 유지 (안 그러면 저장할 때 빈 값이 덮어씀)
-    if (keep && !profiles.some(p => p.name === keep)) {
+    if (keep && !profiles.some(p => p.name === keep) && !allProfiles.length) {
         $sel.append($('<option>').val(keep).text(`${keep} (목록 로딩 대기)`));
     }
-    if (keep) $sel.val(keep);
+    const selectedName = profiles.some(profile => profile.name === keep)
+        ? keep
+        : profiles[0]?.name || '';
+    if (selectedName) $sel.val(selectedName);
+    savedProfileName = selectedName || (!allProfiles.length ? keep : '');
 
-    $('#chatlog-profile-count').text(profiles.length ? `${profiles.length}개 감지됨` : '프로필 목록 로딩 중...');
+    $('#chatlog-profile-count').text(profiles.length
+        ? `${profiles.length}개 Vertex 프로필 감지됨`
+        : allProfiles.length
+            ? 'Vertex AI 연결 프로필이 없습니다'
+            : '프로필 목록 로딩 중...');
     return profiles;
 }
 
@@ -506,7 +522,8 @@ function isVertexProfile(profile) {
 }
 
 function refreshImageProfileSelect(selected) {
-    const profiles = getProfiles();
+    const allProfiles = getProfiles();
+    const profiles = allProfiles.filter(isVertexProfile);
     const $sel = $('#chatlog-image-profile');
 
     if (selected !== undefined) savedImageProfileName = selected || '';
@@ -527,11 +544,14 @@ function refreshImageProfileSelect(selected) {
         $sel.append($('<option>').val(profile.name).text(`${profile.name}${suffix}`));
     });
 
-    if (keep && !profiles.some(profile => profile.name === keep)) {
+    if (keep && !profiles.some(profile => profile.name === keep) && !allProfiles.length) {
         $sel.append($('<option>').val(keep).text(`${keep} (목록 로딩 대기)`));
     }
-    if (keep) $sel.val(keep);
-    savedImageProfileName = keep;
+    const selectedName = profiles.some(profile => profile.name === keep)
+        ? keep
+        : profiles[0]?.name || '';
+    if (selectedName) $sel.val(selectedName);
+    savedImageProfileName = selectedName || (!allProfiles.length ? keep : '');
     updateImageProfileInfo();
     return profiles;
 }
@@ -585,6 +605,7 @@ const FALLBACK_SETTINGS = {
     sharedScenePostChance: 55,
     commentDelayMinMin: 1, commentDelayMaxMin: 30,
     autoCleanup: false, cleanupAfterDays: 1, keepSaved: true,
+    debugEnabled: false,
     textMode: 'profile',
     followActiveProfile: true,
     characterCommentChance: 30,
@@ -602,6 +623,11 @@ async function syncActiveConnectionProfile(profileName = null) {
         ? getProfiles().find(profile => profile.name === profileName)
         : getActiveConnectionProfile();
     if (!active?.name) return;
+    if (!isVertexProfile(active)) {
+        refreshProfileSelect();
+        $('#chatlog-profile-count').text('현재 활성 프로필은 Vertex가 아니므로 저장된 Vertex 프로필을 사용합니다');
+        return;
+    }
     refreshProfileSelect(active.name);
     try {
         await api('/settings', { profileName: active.name, followActiveProfile: true });
@@ -654,12 +680,15 @@ async function loadSettingsUi() {
     }
     $('#chatlog-follow-profile').prop('checked', s.followActiveProfile !== false);
     const activeProfile = getActiveConnectionProfile();
-    refreshProfileSelect(s.followActiveProfile !== false && activeProfile?.name
-        ? activeProfile.name
+    const activeVertexProfile = isVertexProfile(activeProfile) ? activeProfile : null;
+    refreshProfileSelect(s.followActiveProfile !== false && activeVertexProfile?.name
+        ? activeVertexProfile.name
         : s.profileName);
-    if (s.followActiveProfile !== false && activeProfile?.name && activeProfile.name !== s.profileName) {
+    if (s.followActiveProfile !== false
+        && activeVertexProfile?.name
+        && activeVertexProfile.name !== s.profileName) {
         try {
-            await api('/settings', { profileName: activeProfile.name, followActiveProfile: true });
+            await api('/settings', { profileName: activeVertexProfile.name, followActiveProfile: true });
         } catch (e) {
             console.warn('[chatlog] 활성 연결 프로필 초기 동기화 실패', e);
         }
@@ -685,6 +714,7 @@ async function loadSettingsUi() {
     $('#chatlog-autoclean').prop('checked', !!s.autoCleanup);
     $('#chatlog-cleandays').val(s.cleanupAfterDays);
     $('#chatlog-keepsaved').prop('checked', !!s.keepSaved);
+    $('#chatlog-debug-enabled').prop('checked', s.debugEnabled === true);
 
     defaultSchedule = {
         ...defaultSchedule,
@@ -742,6 +772,7 @@ async function saveSettingsUi() {
         autoCleanup: $('#chatlog-autoclean').is(':checked'),
         cleanupAfterDays: Number($('#chatlog-cleandays').val()),
         keepSaved: $('#chatlog-keepsaved').is(':checked'),
+        debugEnabled: $('#chatlog-debug-enabled').is(':checked'),
     });
 
 
@@ -1449,6 +1480,45 @@ function replySheet(room, post) {
 }
 
 // ── 올리기 ────────────────────────────────────────────────
+function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error('사진을 읽지 못했어요.'));
+        reader.readAsDataURL(blob);
+    });
+}
+
+async function normalizeManualPhoto(file) {
+    // 휴대폰 JPEG는 EXIF 방향값에 의존하는 경우가 있다. 브라우저가 방향을
+    // 반영한 화소를 새 JPEG로 만든 뒤 서버에서 EXIF를 다시 제거한다.
+    if (file.type !== 'image/jpeg' || typeof createImageBitmap !== 'function') {
+        return blobToDataUrl(file);
+    }
+    const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    try {
+        const pixelCount = bitmap.width * bitmap.height;
+        if (!bitmap.width
+            || !bitmap.height
+            || bitmap.width > 8192
+            || bitmap.height > 8192
+            || pixelCount > 40_000_000) {
+            throw new Error('사진 해상도가 너무 커요. 조금 줄인 뒤 다시 올려주세요.');
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        const context = canvas.getContext('2d', { alpha: false });
+        if (!context) throw new Error('사진 방향을 정리하지 못했어요.');
+        context.drawImage(bitmap, 0, 0);
+        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.95));
+        if (!blob) throw new Error('사진을 안전하게 변환하지 못했어요.');
+        return blobToDataUrl(blob);
+    } finally {
+        bitmap.close?.();
+    }
+}
+
 function uploadSheet(room) {
     if ($('.chatlog-upload-sheet').length) return;
     const $sheet = $(`
@@ -1479,7 +1549,7 @@ function uploadSheet(room) {
     document.body.appendChild($sheet[0]);
 
     let imageData = null;
-    const readSelectedImage = function () {
+    const readSelectedImage = async function () {
         const f = this.files?.[0];
         if (!f) return;
         if (!f.type.startsWith('image/')) {
@@ -1492,17 +1562,18 @@ function uploadSheet(room) {
             this.value = '';
             return;
         }
-        const reader = new FileReader();
-        reader.onload = () => {
-            imageData = reader.result;
+        try {
+            $sheet.find('.chatlog-preview').html('<small>사진의 위치·촬영정보를 정리하는 중...</small>');
+            imageData = await normalizeManualPhoto(f);
             $sheet.find('.chatlog-preview').html(`<img src="${imageData}">`);
-        };
-        reader.onerror = () => {
+        } catch (error) {
             imageData = null;
             this.value = '';
-            showError('사진을 읽지 못했어요. 다른 사진으로 다시 시도해 주세요.');
-        };
-        reader.readAsDataURL(f);
+            $sheet.find('.chatlog-preview').html(
+                '<span class="fa-regular fa-image"></span><small>사진을 선택해주세요</small>',
+            );
+            showError(error.message || '사진을 읽지 못했어요. 다른 사진으로 다시 시도해 주세요.');
+        }
     };
     $sheet.find('.chatlog-camera-input, .chatlog-gallery-input').on('change', readSelectedImage);
     $sheet.find('.chatlog-photo-source.camera').on('click', () => {
