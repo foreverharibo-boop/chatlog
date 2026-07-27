@@ -5,6 +5,8 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const net = require('net');
 const { findSillyTavernRoot } = require('./paths');
 const { stripImagePrivacyMetadata } = require('./image-security');
 
@@ -27,6 +29,9 @@ const FORCE_COOLDOWN_MS = 30 * 1000;
 const RELOAD_COOLDOWN_MS = 5 * 1000;
 const CLEANUP_COOLDOWN_MS = 10 * 1000;
 const RELATIONSHIP_COOLDOWN_MS = 30 * 1000;
+const MAX_MEMBER_CARD_TEXT_BYTES = 256 * 1024;
+const MAX_ROOM_CARD_TEXT_BYTES = 8 * 1024 * 1024;
+const MAX_PERSONA_DESCRIPTION_BYTES = 256 * 1024;
 
 // 심볼릭 링크 설치에서도 실제 server.js가 있는 ST 루트를 찾는다.
 const ST_ROOT = findSillyTavernRoot();
@@ -152,18 +157,92 @@ function enforceRequestBudget(req, res, next) {
 // 기본값에서 X-Forwarded-Host를 신뢰하면 공격자가 헤더를 위조해
 // 아래 출처 검사를 그대로 통과시킬 수 있다.
 const TRUST_FORWARDED_HOST = process.env.CHATLOG_TRUST_PROXY === '1';
+const STATIC_ALLOWED_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+
+function normalizeNetworkHost(value) {
+    let normalized = String(value || '').trim().toLowerCase();
+    if (!normalized) return '';
+    if (normalized.startsWith('[') && normalized.endsWith(']')) {
+        normalized = normalized.slice(1, -1);
+    }
+    const zoneIndex = normalized.indexOf('%');
+    if (zoneIndex >= 0) normalized = normalized.slice(0, zoneIndex);
+    if (normalized.startsWith('::ffff:') && net.isIP(normalized.slice(7)) === 4) {
+        normalized = normalized.slice(7);
+    }
+    return normalized.replace(/\.$/, '');
+}
+
+function parseHostAuthority(value) {
+    const raw = String(value || '').split(',')[0].trim();
+    if (!raw || /[\s/@\\]/.test(raw)) return null;
+    try {
+        const parsed = new URL(`http://${raw}`);
+        const hostname = normalizeNetworkHost(parsed.hostname);
+        if (!hostname) return null;
+        return {
+            authority: parsed.host.toLowerCase(),
+            hostname,
+        };
+    } catch {
+        return null;
+    }
+}
+
+function configuredAllowedHosts() {
+    const allowed = new Set(STATIC_ALLOWED_HOSTS);
+    const configured = String(process.env.CHATLOG_ALLOWED_HOSTS || '')
+        .split(',')
+        .map(value => value.trim())
+        .filter(Boolean);
+    for (const entry of configured) {
+        let hostname = '';
+        if (net.isIP(normalizeNetworkHost(entry))) {
+            hostname = normalizeNetworkHost(entry);
+        } else {
+            const parsed = parseHostAuthority(entry.replace(/^https?:\/\//i, ''));
+            hostname = parsed?.hostname || '';
+        }
+        if (hostname) allowed.add(hostname);
+    }
+    return allowed;
+}
+
+const CONFIGURED_ALLOWED_HOSTS = configuredAllowedHosts();
+
+function requestLocalHosts(req) {
+    const allowed = new Set(CONFIGURED_ALLOWED_HOSTS);
+    const candidates = [
+        req.socket?.localAddress,
+        req.socket?.address?.()?.address,
+    ];
+    for (const candidate of candidates) {
+        const normalized = normalizeNetworkHost(candidate);
+        // 와일드카드 바인딩 주소는 실제 접속 대상을 뜻하지 않으므로 허용값으로 쓰지 않는다.
+        if (normalized && normalized !== '0.0.0.0' && normalized !== '::') {
+            allowed.add(normalized);
+        }
+    }
+    return allowed;
+}
 
 function requestMatchesServerOrigin(req) {
     const origin = String(req.get?.('origin') || '').trim();
     if (!origin) return true; // curl·로컬 서버 호출은 ST 인증 계층에 맡긴다.
     try {
-        const originHost = new URL(origin).host.toLowerCase();
+        const originUrl = new URL(origin);
+        if (!['http:', 'https:'].includes(originUrl.protocol)) return false;
         const forwardedHost = TRUST_FORWARDED_HOST
             ? String(req.get?.('x-forwarded-host') || '')
                 .split(',')[0].trim().toLowerCase()
             : '';
-        const requestHost = forwardedHost || String(req.get?.('host') || '').trim().toLowerCase();
-        return !!requestHost && originHost === requestHost;
+        const requestHost = parseHostAuthority(
+            forwardedHost || String(req.get?.('host') || ''),
+        );
+        if (!requestHost || originUrl.host.toLowerCase() !== requestHost.authority) {
+            return false;
+        }
+        return requestLocalHosts(req).has(requestHost.hostname);
     } catch {
         return false;
     }
@@ -178,7 +257,7 @@ function atomicWriteJson(targetPath, value) {
     fs.mkdirSync(directory, { recursive: true });
     const temporaryPath = path.join(
         directory,
-        `.${path.basename(targetPath)}.${process.pid}.${Date.now()}.tmp`,
+        `.${path.basename(targetPath)}.${process.pid}.${Date.now()}.${crypto.randomBytes(8).toString('hex')}.tmp`,
     );
     try {
         fs.writeFileSync(temporaryPath, JSON.stringify(value, null, 2), {
@@ -363,7 +442,7 @@ function statusPayload() {
     };
 }
 
-const uid = (p) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+const uid = (p) => `${p}_${Date.now().toString(36)}_${crypto.randomBytes(6).toString('hex')}`;
 function validRecordId(value, prefix) {
     const normalized = String(value || '');
     return normalized.length <= 128
@@ -401,6 +480,14 @@ function limitedString(value, maxLength, { required = false, trim = true } = {})
     return normalized;
 }
 
+function limitedUtf8String(value, maxBytes, options = {}) {
+    const normalized = limitedString(value, maxBytes, options);
+    if (Buffer.byteLength(normalized, 'utf8') > maxBytes) {
+        throw new TypeError('string is too large');
+    }
+    return normalized;
+}
+
 function normalizeAssetName(value, { required = false } = {}) {
     const normalized = limitedString(value, 260, { required });
     if (normalized && (/[\\/]/.test(normalized) || normalized === '.' || normalized === '..')) {
@@ -412,14 +499,20 @@ function normalizeAssetName(value, { required = false } = {}) {
 function normalizeMemberInput(member) {
     if (!isPlainRecord(member)) throw new TypeError('invalid room member');
     const avatar = normalizeAssetName(member.avatar, { required: true });
-    return {
+    const normalized = {
         avatar,
         name: cleanDisplayName(limitedString(member.name || avatar, 120, { required: true })),
-        description: limitedString(member.description || '', 60000, { trim: false }),
-        personality: limitedString(member.personality || '', 30000, { trim: false }),
-        scenario: limitedString(member.scenario || '', 30000, { trim: false }),
-        mesExample: limitedString(member.mesExample || '', 30000, { trim: false }),
+        description: limitedUtf8String(member.description || '', MAX_MEMBER_CARD_TEXT_BYTES, { trim: false }),
+        personality: limitedUtf8String(member.personality || '', MAX_MEMBER_CARD_TEXT_BYTES, { trim: false }),
+        scenario: limitedUtf8String(member.scenario || '', MAX_MEMBER_CARD_TEXT_BYTES, { trim: false }),
+        mesExample: limitedUtf8String(member.mesExample || '', MAX_MEMBER_CARD_TEXT_BYTES, { trim: false }),
     };
+    const cardBytes = ['description', 'personality', 'scenario', 'mesExample']
+        .reduce((total, key) => total + Buffer.byteLength(normalized[key], 'utf8'), 0);
+    if (cardBytes > MAX_MEMBER_CARD_TEXT_BYTES) {
+        throw new TypeError('character card text is too large');
+    }
+    return normalized;
 }
 
 function normalizeMembersInput(members) {
@@ -427,6 +520,12 @@ function normalizeMembersInput(members) {
         throw new TypeError('invalid room members');
     }
     const normalized = members.map(normalizeMemberInput);
+    const roomCardBytes = normalized.reduce((roomTotal, member) => roomTotal
+        + ['description', 'personality', 'scenario', 'mesExample']
+            .reduce((memberTotal, key) => memberTotal + Buffer.byteLength(member[key], 'utf8'), 0), 0);
+    if (roomCardBytes > MAX_ROOM_CARD_TEXT_BYTES) {
+        throw new TypeError('room character card text is too large');
+    }
     const avatars = normalized.map(member => member.avatar);
     if (new Set(avatars).size !== avatars.length) throw new TypeError('duplicate room member');
     return normalized;
@@ -437,7 +536,11 @@ function normalizePersonaInput(persona) {
     if (!isPlainRecord(persona)) throw new TypeError('invalid persona');
     return {
         name: limitedString(persona.name || '유저', 120, { required: true }),
-        description: limitedString(persona.description || '', 60000, { trim: false }),
+        description: limitedUtf8String(
+            persona.description || '',
+            MAX_PERSONA_DESCRIPTION_BYTES,
+            { trim: false },
+        ),
         avatar: normalizeAssetName(persona.avatar),
         file: normalizeAssetName(persona.file),
     };

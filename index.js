@@ -4,8 +4,13 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.9.5';
+const CHATLOG_VERSION = '0.9.6';
 const MAX_MANUAL_IMAGE_BYTES = 20 * 1024 * 1024;
+const CARD_SYNC_TEXT_BUDGET_BYTES = 240 * 1024;
+const ROOM_SYNC_TEXT_BUDGET_BYTES = 7 * 1024 * 1024;
+const PERSONA_SYNC_TEXT_BUDGET_BYTES = 240 * 1024;
+const UTF8_ENCODER = new TextEncoder();
+const cardSyncWarnings = new Set();
 
 // ── 유틸 ──────────────────────────────────────────────────
 const ctx = () => window.SillyTavern?.getContext?.() || {};
@@ -42,6 +47,87 @@ const notify = (type, message) => {
 const showError = (message) => {
     notify('error', message);
 };
+
+function utf8Length(value) {
+    return UTF8_ENCODER.encode(String(value ?? '')).byteLength;
+}
+
+function truncateUtf8(value, maxBytes) {
+    const input = String(value ?? '');
+    if (maxBytes <= 0) return '';
+    if (utf8Length(input) <= maxBytes) return input;
+    let low = 0;
+    let high = input.length;
+    while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        if (utf8Length(input.slice(0, middle)) <= maxBytes) low = middle;
+        else high = middle - 1;
+    }
+    let output = input.slice(0, low);
+    const last = output.charCodeAt(output.length - 1);
+    if (last >= 0xd800 && last <= 0xdbff) output = output.slice(0, -1);
+    return output;
+}
+
+function fitTextFields(source, fields, budgetBytes) {
+    const fitted = {};
+    let remaining = budgetBytes;
+    let truncated = false;
+    for (const field of fields) {
+        const original = String(source?.[field] ?? '');
+        const value = truncateUtf8(original, remaining);
+        fitted[field] = value;
+        remaining = Math.max(0, remaining - utf8Length(value));
+        if (value !== original) truncated = true;
+    }
+    return { fitted, truncated };
+}
+
+function attachSyncMeta(value, truncated) {
+    Object.defineProperty(value, '__chatlogTruncated', {
+        value: !!truncated,
+        enumerable: false,
+        configurable: false,
+    });
+    return value;
+}
+
+function personaSnapshotForSync(persona) {
+    const description = truncateUtf8(
+        persona?.description || '',
+        PERSONA_SYNC_TEXT_BUDGET_BYTES,
+    );
+    return attachSyncMeta({
+        name: persona?.name || '나',
+        description,
+        avatar: persona?.file || persona?.avatar || null,
+    }, description !== String(persona?.description || ''));
+}
+
+function warnCardSyncOnce(key, message) {
+    if (cardSyncWarnings.has(key)) return;
+    cardSyncWarnings.add(key);
+    notify('warning', message);
+}
+
+function fitRoomMemberSnapshots(members) {
+    let remaining = ROOM_SYNC_TEXT_BUDGET_BYTES;
+    return (members || []).map(member => {
+        const perMemberBudget = Math.min(CARD_SYNC_TEXT_BUDGET_BYTES, remaining);
+        const { fitted, truncated } = fitTextFields(
+            member,
+            ['description', 'personality', 'scenario', 'mesExample'],
+            perMemberBudget,
+        );
+        const used = Object.values(fitted)
+            .reduce((total, value) => total + utf8Length(value), 0);
+        remaining = Math.max(0, remaining - used);
+        return attachSyncMeta(
+            { ...member, ...fitted },
+            member.__chatlogTruncated || truncated,
+        );
+    });
+}
 
 function cleanDisplayName(value) {
     let name = String(value || '').trim();
@@ -141,11 +227,7 @@ function memberPersonasForMembers(members) {
     return Object.fromEntries((members || [])
         .map(member => [member.avatar, linkedPersonaForMember(member)])
         .filter(([, persona]) => !!persona)
-        .map(([avatar, persona]) => [avatar, {
-            name: persona.name,
-            description: persona.description || '',
-            avatar: persona.file || null,
-        }]));
+        .map(([avatar, persona]) => [avatar, personaSnapshotForSync(persona)]));
 }
 
 /**
@@ -207,7 +289,7 @@ function avatarUrl(avatar, room) {
 
 function characterSnapshot(ch, avatar = ch?.avatar) {
     const data = ch?.data || {};
-    return {
+    const source = {
         avatar,
         name: ch?.name ?? data.name ?? cleanDisplayName(avatar),
         description: ch?.description ?? data.description ?? '',
@@ -215,6 +297,12 @@ function characterSnapshot(ch, avatar = ch?.avatar) {
         scenario: ch?.scenario ?? data.scenario ?? '',
         mesExample: ch?.mes_example ?? ch?.mesExample ?? data.mes_example ?? '',
     };
+    const { fitted, truncated } = fitTextFields(
+        source,
+        ['description', 'personality', 'scenario', 'mesExample'],
+        CARD_SYNC_TEXT_BUDGET_BYTES,
+    );
+    return attachSyncMeta({ ...source, ...fitted }, truncated);
 }
 
 async function syncRoomCharacterCards() {
@@ -222,20 +310,42 @@ async function syncRoomCharacterCards() {
     if (!chars.length) return;
 
     for (const room of Object.values(state.rooms || {})) {
-        const members = (room.members || []).map(old => {
+        const truncatedNames = [];
+        const members = fitRoomMemberSnapshots((room.members || []).map(old => {
             const ch = chars.find(item => item.avatar === old.avatar);
-            return ch ? { ...old, ...characterSnapshot(ch, old.avatar) } : old;
-        });
+            const snapshot = characterSnapshot(ch || old, old.avatar);
+            if (snapshot.__chatlogTruncated) {
+                truncatedNames.push(snapshot.name || cleanDisplayName(old.avatar));
+            }
+            return { ...old, ...snapshot };
+        }));
+        for (const member of members) {
+            if (member.__chatlogTruncated
+                && !truncatedNames.includes(member.name || cleanDisplayName(member.avatar))) {
+                truncatedNames.push(member.name || cleanDisplayName(member.avatar));
+            }
+        }
         const persona = personaForRoom({ ...room, members });
-        const personaSnapshot = {
-            name: persona.name,
-            description: persona.description || '',
-            avatar: persona.file || null,
-        };
+        const personaSnapshot = personaSnapshotForSync(persona);
+        if (personaSnapshot.__chatlogTruncated) {
+            warnCardSyncOnce(
+                `persona:${room.id}:${personaSnapshot.avatar || personaSnapshot.name}`,
+                `${personaSnapshot.name} 페르소나 설명이 매우 길어 챗로그용 사본은 앞부분 240KB까지만 사용합니다.`,
+            );
+        }
         const personaRecordsReady = Object.keys(personaStore().descs).length > 0;
         const memberPersonas = personaRecordsReady
             ? memberPersonasForMembers(members)
             : (room.memberPersonas || {});
+        for (const [memberAvatar, linkedPersona] of Object.entries(memberPersonas)) {
+            if (!linkedPersona?.__chatlogTruncated) continue;
+            const memberName = members.find(member => member.avatar === memberAvatar)?.name
+                || cleanDisplayName(memberAvatar);
+            warnCardSyncOnce(
+                `linked-persona:${room.id}:${memberAvatar}:${linkedPersona.avatar || linkedPersona.name}`,
+                `${memberName}의 연결 페르소나 설명이 매우 길어 챗로그용 사본은 앞부분 240KB까지만 사용합니다.`,
+            );
+        }
         const patch = {};
         if (JSON.stringify(members) !== JSON.stringify(room.members || [])) patch.members = members;
         if (JSON.stringify(personaSnapshot) !== JSON.stringify(room.persona || {})) patch.persona = personaSnapshot;
@@ -243,9 +353,22 @@ async function syncRoomCharacterCards() {
             patch.memberPersonas = memberPersonas;
         }
         if (!Object.keys(patch).length) continue;
-        Object.assign(room, patch);
-        const updated = await api('/room/update', { roomId: room.id, ...patch });
-        Object.assign(room, updated);
+        if (truncatedNames.length) {
+            warnCardSyncOnce(
+                `cards:${room.id}:${truncatedNames.join('|')}`,
+                `${truncatedNames.join(', ')} 카드가 매우 길어 챗로그용 사본은 캐릭터당 앞부분 240KB까지만 사용합니다.`,
+            );
+        }
+        try {
+            const updated = await api('/room/update', { roomId: room.id, ...patch });
+            Object.assign(room, updated);
+        } catch (error) {
+            console.warn(`[chatlog] ${room.name || room.id} 카드 동기화 실패 — 다른 방과 연결 프로필 처리는 계속합니다.`, error);
+            warnCardSyncOnce(
+                `sync-error:${room.id}:${error.message}`,
+                `${room.name || '방'}의 캐릭터 카드 동기화만 실패했어요. 다른 챗로그 기능은 계속 실행됩니다: ${error.message}`,
+            );
+        }
     }
 }
 
@@ -794,7 +917,7 @@ async function saveSettingsUi() {
     for (const room of Object.values(rooms)) {
         await api('/room/update', { roomId: room.id, schedule: defaultSchedule });
     }
-    toastr?.success?.('챗로그 설정 저장됨');
+    notify('success', '챗로그 설정 저장됨');
 }
 
 // ═══════════ 오버레이 ═══════════
@@ -1807,7 +1930,7 @@ async function refreshRoomRelationships(room, button = null, options = {}) {
     const $button = button ? $(button) : null;
     if ($button?.hasClass('busy')) return null;
     $button?.addClass('busy');
-    if (!options.silent) toastr?.info?.('캐릭터 카드와 최근 채팅에서 단톡 관계를 분석하고 있어요.');
+    if (!options.silent) notify('info', '캐릭터 카드와 최근 채팅에서 단톡 관계를 분석하고 있어요.');
     try {
         const result = await api('/room/relationships/refresh', { roomId: room.id });
         if (result.room) {
@@ -1955,7 +2078,7 @@ async function editRoomRelationships(room, options = {}) {
             };
         }).get();
         if (invalidCustom) {
-            toastr?.warning?.('직접 입력한 관계 이름을 적어 주세요.');
+            notify('warning', '직접 입력한 관계 이름을 적어 주세요.');
             invalidCustom.find('.chatlog-relation-label').trigger('focus');
             $button.removeClass('busy').text('관계 저장');
             return;
@@ -1967,7 +2090,7 @@ async function editRoomRelationships(room, options = {}) {
             });
             state.rooms[room.id] = result.room;
             close();
-            toastr?.success?.('이 방의 관계를 직접 고정했어요.');
+            notify('success', '이 방의 관계를 직접 고정했어요.');
             render();
         } catch (error) {
             notify('error', '관계 저장 실패: ' + error.message);
@@ -2012,28 +2135,49 @@ async function createRoomFlow() {
         showError('캐릭터를 한 명 이상 선택해 주세요.');
         return;
     }
-    const members = picked.map(av => {
+    const members = fitRoomMemberSnapshots(picked.map(av => {
         const ch = chars.find(x => x.avatar === av) || {};
         return characterSnapshot(ch, av);
-    });
+    }));
+    const truncatedMembers = members
+        .filter(member => member.__chatlogTruncated)
+        .map(member => member.name || cleanDisplayName(member.avatar));
+    if (truncatedMembers.length) {
+        notify(
+            'warning',
+            `${truncatedMembers.join(', ')} 카드가 매우 길어 챗로그용 사본은 캐릭터당 앞부분 240KB까지만 사용합니다.`,
+        );
+    }
 
     const persona = await chooseDisplayPersona(c, members);
     if (!persona) return;
     const memberPersonas = memberPersonasForMembers(members);
+    for (const [memberAvatar, linkedPersona] of Object.entries(memberPersonas)) {
+        if (!linkedPersona?.__chatlogTruncated) continue;
+        const memberName = members.find(member => member.avatar === memberAvatar)?.name
+            || cleanDisplayName(memberAvatar);
+        notify(
+            'warning',
+            `${memberName}의 연결 페르소나 설명이 매우 길어 챗로그용 사본은 앞부분 240KB까지만 사용합니다.`,
+        );
+    }
+    const personaSnapshot = personaSnapshotForSync(persona);
+    if (personaSnapshot.__chatlogTruncated) {
+        notify(
+            'warning',
+            `${personaSnapshot.name} 페르소나 설명이 매우 길어 챗로그용 사본은 앞부분 240KB까지만 사용합니다.`,
+        );
+    }
     const room = await api('/room', {
         name,
         members,
         schedule: defaultSchedule,
-        persona: {
-            name: persona.name,
-            description: persona.description || '',
-            avatar: persona.file || null,
-        },
+        persona: personaSnapshot,
         memberPersonas,
     });
     state.rooms[room.id] = room;
     await refresh();
-    toastr?.success?.('단톡을 만들었어요. 표시 페르소나와의 관계를 정해 주세요.');
+    notify('success', '단톡을 만들었어요. 표시 페르소나와의 관계를 정해 주세요.');
     await editRoomRelationships(state.rooms[room.id] || room, { initial: true });
 }
 
@@ -2177,12 +2321,12 @@ function cleanComment(raw) {
 async function runLocal(roomId = null) {
     const svc = await getRequestService();
     if (!svc) {
-        toastr?.warning?.('백그라운드 생성 API를 못 찾았어요. /chatlog-run 으로 서버에서 돌리세요');
+        notify('warning', '백그라운드 생성 API를 못 찾았어요. /chatlog-run 으로 서버에서 돌리세요');
         return 0;
     }
 
     const jobs = await api('/jobs/claim', { roomId, type: 'comment' });
-    if (!jobs.length) { toastr?.info?.('대기 중인 댓글이 없어요'); return 0; }
+    if (!jobs.length) { notify('info', '대기 중인 댓글이 없어요'); return 0; }
 
     let ok = 0;
     for (const job of jobs) {
@@ -2208,7 +2352,7 @@ async function runLocal(roomId = null) {
         await delay(400);   // 연타 방지
     }
 
-    toastr?.success?.(`댓글 ${ok}개 생성`);
+    notify('success', `댓글 ${ok}개 생성`);
     if ($overlay) refresh();
     return ok;
 }
@@ -2510,7 +2654,7 @@ function registerSlashCommands() {
             const msg = `댓글 ${r.comments}개, 반응 ${r.reactions || 0}개, 컷 ${r.cuts}개 생성`
                 + (r.skipped ? `, ${r.skipped}개 건너뜀` : '')
                 + (r.errors?.length ? ` / 오류 ${r.errors.length}건` : '');
-            toastr?.info?.(msg);
+            notify('info', msg);
             if (r.errors?.length) console.warn('[chatlog]', r.errors);
             if ($overlay) refresh();
             return msg;
@@ -2524,7 +2668,7 @@ function registerSlashCommands() {
         callback: async (args) => {
             await ensureState();
             await api('/force/now', { roomId: roomIdByName(args.room) });
-            toastr?.info?.('다음 슬롯을 지금으로 당겼어요 (1분 내 실행)');
+            notify('info', '다음 슬롯을 지금으로 당겼어요 (1분 내 실행)');
             return 'ok';
         },
     }));
@@ -2545,7 +2689,7 @@ function registerSlashCommands() {
         helpString: '서버의 ai.js / settings.json 다시 읽기 (ST 재시작 불필요)',
         callback: async () => {
             const r = await api('/reload', {});
-            toastr?.success?.('리로드 완료');
+            notify('success', '리로드 완료');
             return JSON.stringify(r);
         },
     }));
@@ -2556,7 +2700,7 @@ function registerSlashCommands() {
         callback: async () => {
             const jobs = await api('/jobs');
             console.table(jobs);
-            toastr?.info?.(`대기 중 ${jobs.length}건 (콘솔 확인)`);
+            notify('info', `대기 중 ${jobs.length}건 (콘솔 확인)`);
             return JSON.stringify(jobs);
         },
     }));
@@ -2611,11 +2755,11 @@ jQuery(async () => {
     $('#chatlog-profile-refresh').on('click', () => {
         const n = refreshProfileSelect().length;
         refreshImageProfileSelect();
-        toastr?.info?.(n ? `연결 프로필 ${n}개` : '연결 프로필을 못 찾았어요');
+        notify('info', n ? `연결 프로필 ${n}개` : '연결 프로필을 못 찾았어요');
     });
     $('#chatlog-image-profile-refresh').on('click', () => {
         const n = refreshImageProfileSelect().length;
-        toastr?.info?.(n ? `연결 프로필 ${n}개` : '연결 프로필을 못 찾았어요');
+        notify('info', n ? `연결 프로필 ${n}개` : '연결 프로필을 못 찾았어요');
     });
     $('#chatlog-textmode').on('change', toggleTextMode);
     $('#chatlog-image-profile').on('change', updateImageProfileInfo);
@@ -2644,14 +2788,14 @@ jQuery(async () => {
         }
     });
     $('#chatlog-reload').on('click', async () => {
-        try { await api('/reload', {}); toastr?.success?.('서버 코드 리로드 완료'); }
+        try { await api('/reload', {}); notify('success', '서버 코드 리로드 완료'); }
         catch (e) { notify('error', '리로드 실패: ' + e.message); }
     });
     $('#chatlog-status-refresh').on('click', loadRuntimeStatus);
     $('#chatlog-cleannow').on('click', async () => {
         if (!confirm('지난 기록을 지금 정리할까요?')) return;
         await api('/cleanup', { force: true });
-        toastr?.success?.('정리 완료');
+        notify('success', '정리 완료');
         if ($overlay) refresh();
     });
     // 확장 설정 드로어를 열 때마다 프로필 목록과 현재 선택값 갱신
