@@ -146,6 +146,21 @@ body > .chatlog-sheet * {
     padding: 0 6px;
 }
 
+.chatlog-roomdel {
+    margin-left: auto;
+    flex: 0 0 auto;
+    width: 34px; height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 12px;
+    color: #c9c3b8;
+    font-size: 0.85em;
+}
+.chatlog-badge + .chatlog-roomdel { margin-left: 8px; }
+.chatlog-roomdel:hover { color: #ff4a3d; background: #fdf0ee; }
+.chatlog-roomdel.busy { opacity: 0.4; pointer-events: none; }
+
 .chatlog-newroom {
     margin-top: 14px;
     padding: 14px;

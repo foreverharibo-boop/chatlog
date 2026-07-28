@@ -2217,6 +2217,41 @@ async function init(router) {
         res.json({ ok: true });
     });
 
+    // 방 삭제 — 게시물·이미지 파일·대기 작업·공유 장면까지 전부 제거
+    router.post('/room/delete', (req, res) => {
+        const { roomId } = req.body || {};
+        if (!validRecordId(roomId, 'room')) {
+            return res.status(400).json({ error: 'invalid room id' });
+        }
+        if (!Object.prototype.hasOwnProperty.call(db.rooms, roomId)) {
+            return res.status(404).json({ error: 'room not found' });
+        }
+        const posts = Array.isArray(db.posts[roomId]) ? db.posts[roomId] : [];
+        let removedImages = 0;
+        let skippedImages = 0;
+        for (const post of posts) {
+            if (!post?.image) continue;
+            // removeImageFile이 chatlog 폴더 검증을 다시 하므로
+            // 검증 실패 경로는 파일을 건드리지 않고 건너뛴 개수만 센다.
+            if (resolveChatlogImage(post.image, true)) {
+                removeImageFile(post.image);
+                removedImages++;
+            } else {
+                skippedImages++;
+            }
+        }
+        delete db.rooms[roomId];
+        delete db.posts[roomId];
+        db.jobs = db.jobs.filter(job => job.roomId !== roomId);
+        saveDb();
+        res.json({
+            ok: true,
+            removedPosts: posts.length,
+            removedImages,
+            skippedImages,
+        });
+    });
+
     // 수동 정리
     router.post('/cleanup', (req, res) => {
         const guard = acquireProtectedAction('cleanup', CLEANUP_COOLDOWN_MS);
