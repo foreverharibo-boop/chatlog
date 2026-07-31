@@ -1913,6 +1913,9 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
     const personaName = persona.name || settings.userPersonaName || '유저';
     const personaDescription = persona.description || '';
     const temporal = seasonContext(slotAt);
+    // 게시 여부·동반자 추첨과 분리된 운동 복장 추첨. 재시도마다 같은 생성
+    // 요청 안에서는 이 값이 유지되어 프롬프트의 선택이 흔들리지 않는다.
+    const athleticAttireRoll = crypto.randomInt(100);
     const photoMode = decision.photoMode === 'selfie' ? 'selfie' : 'everyday';
     const everydayPhoto = photoMode === 'everyday';
     const sharedScene = decision.sharedScene || null;
@@ -2044,7 +2047,7 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
         '- 캐릭터 카드에 없는 신체 상태·직업·가족관계를 캐릭터 본인에게 새로 부여하지 마라.',
         '',
         'JSON만 출력한다. 마크다운 코드펜스 금지.',
-        '{"post": true 또는 false, "caption": "캐릭터 시점의 25자 이내 SNS 캡션", "scene": "사진 장면을 영어로 묘사", "continuity": "같은 장면의 다음 게시물도 유지할 장소·조명·공유 사물을 영어 300자 이내", "viewpoint": "이번 사진의 고유 구도와 주 피사체를 영어 120자 이내", "visualIdentity": "게시 캐릭터의 눈에 보이는 외형만 영어 200자 이내", "personaVisible": true 또는 false, "personaVisualIdentity": "페르소나가 보일 때 페르소나의 눈에 보이는 외형만 영어 200자 이내", "roleCheck": "각 인물이 무엇을 하는지 짧게 확인"}',
+        '{"post": true 또는 false, "caption": "캐릭터 시점의 25자 이내 SNS 캡션", "scene": "사진 장면을 영어로 묘사", "wardrobe": "사진 속 인물들의 현재 옷차림을 영어 180자 이내로 명시", "continuity": "같은 장면의 다음 게시물도 유지할 장소·조명·공유 사물을 영어 300자 이내", "viewpoint": "이번 사진의 고유 구도와 주 피사체를 영어 120자 이내", "visualIdentity": "게시 캐릭터의 눈에 보이는 외형만 영어 200자 이내", "personaVisible": true 또는 false, "personaVisualIdentity": "페르소나가 보일 때 페르소나의 눈에 보이는 외형만 영어 200자 이내", "roleCheck": "각 인물이 무엇을 하는지 짧게 확인"}',
         '',
         '게시 여부 규칙:',
         forcePost
@@ -2062,6 +2065,12 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
         '- 캐릭터 프사는 얼굴과 고정 외형의 참고 자료일 뿐이다. 프사에 보이는 옷, 노출 정도, 포즈, 행동, 배경을 현재 장면으로 복사하지 마라.',
         '- 카페·식당·상점·학교 실내·도서관·사무실·대중교통 같은 일반적인 공공장소에서는 모든 인물에게 정상적인 상의를 반드시 입힌다.',
         '- 그 밖의 장소에서는 현재 활동, 사생활 정도, 날씨, 계절, 안전과 캐릭터 성격에 맞춰 옷차림을 자연스럽게 결정한다. 프사에 보이는 옷이나 노출 정도를 그대로 복사하지 마라.',
+        `- 이번 운동 복장 추첨값은 ${athleticAttireRoll}/99다. 이 값은 게시 여부 추첨과 별개다.`,
+        '- 캐릭터 카드에서 명백히 성인임을 확인할 수 있고, 현재 scene이 고강도 헬스·근력운동·유산소·야외 체력훈련 중이거나 그런 운동을 막 끝낸 직후 휴식인 경우에만 운동 복장 추첨을 적용한다.',
+        '- 위 조건을 모두 만족하고 종목 규칙·보호장비·날씨·안전·시설 규정에도 어긋나지 않을 때, 추첨값 0~59는 실용적인 상의 탈의 운동 차림을 wardrobe와 scene에 명시하고 60~99는 정상적인 운동복 상의를 명시한다.',
+        '- 나이가 불명확하거나 미성년자인 캐릭터에는 이 상의 탈의 선호를 적용하지 않고 정상적인 운동복을 사용한다. 경기·스크리미지·접촉 훈련처럼 유니폼이나 보호장비가 필요한 활동도 추첨보다 장비를 우선한다.',
+        '- 운동 복장은 일상적이고 기능적인 스포츠 장면으로만 표현하며 과시적이거나 선정적인 연출을 하지 마라.',
+        '- wardrobe에는 최종적으로 결정한 실제 옷차림을 영어로 구체적으로 적는다. 인물이 없는 일상 사진이면 빈 문자열로 둔다.',
         '- visualIdentity에 성격, 관계, 과거사, 직업 설명, 유저 정보, 신체 상태에 관한 추측을 넣지 마라.',
         companionSelfie
             ? `- 이번 사진에는 연결 페르소나(${personaName})가 반드시 보인다. personaVisible은 true다.`
@@ -2094,6 +2103,7 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
     const user = [
         `현재 날짜와 시각은 ${temporal.label}, ${timeLabel(slotAt)}이다.`,
         `이번 랜덤 게시 충동은 ${decision.randomRoll ?? 50}/99이다.`,
+        `이번 운동 복장 추첨은 ${athleticAttireRoll}/99이며, 해당되는 성인 고강도 운동·운동 직후 장면에서만 사용한다.`,
         `이번 사진 유형은 ${everydayPhoto
             ? sharedSceneActive ? `공동 장면(${sharedScene.locationKo})의 사람 없는 일상 사진` : '사람 없는 일상 사진'
             : roomCompanionSelfie
@@ -2208,6 +2218,11 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
                 );
             }
             sceneParts.push(parsed.scene);
+            if (!everydayPhoto && typeof parsed.wardrobe === 'string' && parsed.wardrobe.trim()) {
+                sceneParts.push(
+                    `Required scene wardrobe: ${parsed.wardrobe.trim().slice(0, 180)}.`,
+                );
+            }
             if (roomCompanionSelfie) {
                 sceneParts.push(
                     `The visible people are exactly ${[member.name, ...roomCompanionNames].join(', ')} as separate people.`,

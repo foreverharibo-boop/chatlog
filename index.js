@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.9.8';
+const CHATLOG_VERSION = '0.9.9';
 const MAX_MANUAL_IMAGE_BYTES = 20 * 1024 * 1024;
 const CARD_SYNC_TEXT_BUDGET_BYTES = 240 * 1024;
 const ROOM_SYNC_TEXT_BUDGET_BYTES = 7 * 1024 * 1024;
