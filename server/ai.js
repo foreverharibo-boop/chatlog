@@ -2058,7 +2058,10 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
             : '- 랜덤 게시 충동이 선택한 기준 이상일 때만 post를 true로 한다.',
         '- 지금 실제로 찍어 공유할 만한 순간이 없으면 post는 false다.',
         '- post가 false면 caption과 scene은 빈 문자열로 둔다.',
-        '- post가 true면 visualIdentity에는 캐릭터 카드에서 확인되는 성별, 대략적 나이, 머리, 얼굴, 체격, 현재 옷처럼 사진에 필요한 외형만 짧게 쓴다.',
+        '- post가 true면 visualIdentity에는 캐릭터 카드에서 확인되는 성별, 대략적 나이, 머리, 얼굴, 체격처럼 사진에 필요한 고정 외형과 이번 장소·활동·계절에 맞는 현재 옷차림만 짧게 쓴다.',
+        '- 캐릭터 프사는 얼굴과 고정 외형의 참고 자료일 뿐이다. 프사에 보이는 옷, 노출 정도, 포즈, 행동, 배경을 현재 장면으로 복사하지 마라.',
+        '- 카페·식당·상점·학교 실내·도서관·사무실·대중교통 같은 일반적인 공공장소에서는 모든 인물에게 정상적인 상의를 반드시 입힌다.',
+        '- 그 밖의 장소에서는 현재 활동, 사생활 정도, 날씨, 계절, 안전과 캐릭터 성격에 맞춰 옷차림을 자연스럽게 결정한다. 프사에 보이는 옷이나 노출 정도를 그대로 복사하지 마라.',
         '- visualIdentity에 성격, 관계, 과거사, 직업 설명, 유저 정보, 신체 상태에 관한 추측을 넣지 마라.',
         companionSelfie
             ? `- 이번 사진에는 연결 페르소나(${personaName})가 반드시 보인다. personaVisible은 true다.`
@@ -2080,6 +2083,7 @@ async function generateCharacterCut(settings, room, member, slotAt, decision = {
         '- caption에는 내부 역할표시인 "유저", "user", "페르소나", "persona"를 호칭처럼 쓰지 않는다. 실제 이름이나 관계에 맞는 호칭만 쓴다.',
         '- 폰으로 방금 대충 찍어 바로 올린 스냅이어야 한다. 구도가 조금 어긋나도 좋다.',
         '- 조명·장소·사물을 구체적으로. 추상적 표현 금지.',
+        '- scene에 등장하는 모든 인물의 복장은 프사보다 현재 장소와 활동을 우선한다. 공공장소에 어울리지 않는 옷차림이 생성되려 하면 장소에 맞는 옷으로 고쳐서 출력한다.',
         `- 현재 달력과 시간대는 ${temporal.label}, ${timeLabel(slotAt)}이다. 장면과 caption의 아침·낮·저녁·밤 표현을 반드시 이 시각에 맞춘다.`,
         `- 이미지 조명 규칙: ${temporal.lightingEn}`,
         `- 장면의 옷차림, 자연광의 길이와 색, 식생과 주변 환경을 ${temporal.seasonKo}에 자연스럽게 맞춘다.`,
@@ -2316,6 +2320,8 @@ async function requestGeneratedImage(api, prompt, references = []) {
                 `Reference image ${index + 1}: ${neutralLabel}.`,
                 'This reference image is the sole visual identity source for this person.',
                 'Copy the same face and visible identity from the reference pixels; do not infer appearance from a name, fictional canon, film, actor, celebrity, franchise, adaptation, or general training-data association.',
+                'Use the reference for identity only. Do not copy its clothing, amount of exposed skin, pose, activity, setting, lighting or background.',
+                'Wardrobe must be chosen from the requested scene, location, season and activity, even when it differs completely from the reference image.',
                 'Keep this person distinct from every other reference.',
             ].join(' '),
         });
@@ -2401,7 +2407,7 @@ async function generateImage(
     const companionIdentityLocks = usableReferences.slice(1)
         .map((reference, offset) => {
             const personLabel = `Person ${String.fromCharCode(66 + offset)}`;
-            return `${personLabel} must be the exact separate person shown in Reference image ${offset + 2}. Reference image ${offset + 2} is the sole visual identity source for ${personLabel}.`;
+            return `${personLabel} must be the exact separate person shown in Reference image ${offset + 2}. Reference image ${offset + 2} is the sole visual identity source for ${personLabel}, but it is not a wardrobe, pose, activity or background reference.`;
         });
     const allReferenceLabels = usableReferences
         .map((_, index) => `Person ${String.fromCharCode(65 + index)}`);
@@ -2411,6 +2417,7 @@ async function generateImage(
             'STRICT REFERENCE-ONLY IDENTITY LOCK.',
             'Person A is the posting character and must be the exact person shown in Reference image 1.',
             'Reference image 1 is the sole and mandatory source for Person A’s face, facial proportions, eyes, nose, mouth, jaw, hair, apparent age, skin tone and build.',
+            'Reference image 1 is not a wardrobe reference. Ignore its clothing, amount of exposed skin, pose, activity, setting, lighting and background.',
             'Ignore every visual association learned from character names, fictional canon, books, films, television, actors, celebrities, franchises, adaptations or fandom artwork.',
             'Do not render a canonical version, screen adaptation, actor, celebrity, lookalike or alternate interpretation of Person A.',
             'Names in the scene are role labels only and have been intentionally replaced with neutral labels. Never use a name to decide appearance.',
@@ -2427,11 +2434,20 @@ async function generateImage(
     const seasonRule = temporalContext
         ? `Calendar context: ${temporalContext}. Match clothing, daylight, vegetation and surroundings to this date, season and time. Do not invent rain, snow or extreme weather from the season alone. If the described location has a different climate or the scene is indoors, follow the actual location and environment instead.`
         : '';
+    const attireRule = everydayPhoto
+        ? ''
+        : [
+            'SCENE-APPROPRIATE WARDROBE OVERRIDES REFERENCE WARDROBE.',
+            'Dress every visible person for the requested place, activity, season and time; never copy an undressed or minimally dressed state merely because it appears in a reference image.',
+            'In ordinary public places such as cafes, restaurants, shops, indoor school areas, libraries, offices and public transit, every visible person must wear a normal complete top and socially appropriate public clothing.',
+            'Outside those ordinary public settings, choose clothing naturally from the current activity, level of privacy, weather, season, safety and character behavior without forcing either a dressed or undressed state.',
+            'Never copy the wardrobe or amount of exposed skin from a reference image. If the scene wording and the reference wardrobe conflict, follow the scene.',
+        ].join(' ');
     const qualityRule = 'Create the image now as a casual phone snapshot taken moments ago for an immediate social post. Natural available light, slightly imperfect framing, no text, no watermark.';
-    const fullPrompt = `${neutralScene}. ${identityRule} ${seasonRule} ${cameraRule} ${qualityRule}`;
+    const fullPrompt = `${neutralScene}. ${identityRule} ${seasonRule} ${attireRule} ${cameraRule} ${qualityRule}`;
     const compactPrompt = everydayPhoto
         ? `${neutralScene}. ${identityRule} ${seasonRule} Generate a casual rear-camera phone snapshot of daily life with absolutely no people. No text or watermark.`
-        : `${neutralScene}. ${identityRule} ${seasonRule} Generate a casual phone selfie taken by Person A. No text or watermark.`;
+        : `${neutralScene}. ${identityRule} ${seasonRule} ${attireRule} Generate a casual phone selfie taken by Person A. No text or watermark.`;
     const recoveryPrompt = everydayPhoto
         ? `${neutralScene}. Generate a fresh casual rear-camera phone snapshot. No person, face, body, human reflection, text or watermark. ${seasonRule}`
         : [
@@ -2441,6 +2457,7 @@ async function generateImage(
             hasCompanionReference
                 ? `${companionIdentityLocks.join(' ')} Keep every referenced face distinct.`
                 : 'Only Person A may be visible.',
+            attireRule,
             cameraRule,
             seasonRule,
             'No text or watermark.',

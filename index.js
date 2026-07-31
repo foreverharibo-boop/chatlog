@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.9.6';
+const CHATLOG_VERSION = '0.9.8';
 const MAX_MANUAL_IMAGE_BYTES = 20 * 1024 * 1024;
 const CARD_SYNC_TEXT_BUDGET_BYTES = 240 * 1024;
 const ROOM_SYNC_TEXT_BUDGET_BYTES = 7 * 1024 * 1024;
@@ -1159,31 +1159,11 @@ function renderRooms() {
               <div class="chatlog-roomsub">${room.members.length}명 · ${last ? timeLabel(last.createdAt) : '기록 없음'}</div>
             </div>
             ${unread ? `<span class="chatlog-badge">${unread}</span>` : ''}
-            <span class="chatlog-roomdel fa-solid fa-trash" title="로그 삭제"></span>
           </div>`);
         $card.on('click', () => {
             markRead(room.id);
             view = { screen: 'feed', roomId: room.id };
             render();
-        });
-        $card.find('.chatlog-roomdel').on('click', async event => {
-            event.stopPropagation();
-            const $button = $(event.currentTarget);
-            if ($button.hasClass('busy')) return;
-            if (!confirm(`"${room.name}" 로그를 삭제할까요?\n사진 파일과 글, 댓글, 대기 중인 작업까지 전부 지워지고 되돌릴 수 없어요.`)) return;
-            $button.addClass('busy');
-            try {
-                const result = await api('/room/delete', { roomId: room.id });
-                delete state.rooms[room.id];
-                delete state.posts[room.id];
-                if (view.roomId === room.id) view = { screen: 'rooms', roomId: null };
-                updateQuickOpenBadge();
-                render();
-                notify('success', `로그를 삭제했어요. 게시물 ${Number(result.removedPosts || 0)}개 · 사진 ${Number(result.removedImages || 0)}장 정리${result.skippedImages ? ` (경로 검증 실패로 ${Number(result.skippedImages)}장은 남겨둠)` : ''}`);
-            } catch (error) {
-                $button.removeClass('busy');
-                notify('error', `로그 삭제 실패: ${error.message}`);
-            }
         });
         $b.append($card);
     }
