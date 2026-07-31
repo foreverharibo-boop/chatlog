@@ -131,11 +131,20 @@ body > .chatlog-sheet * {
 .chatlog-roomthumb img { width: 100%; height: 100%; object-fit: cover; }
 .chatlog-roomthumb span { color: #d5d0c8; }
 
+.chatlog-roommeta { flex: 1 1 auto; min-width: 0; }
 .chatlog-roomname { font-weight: 650; font-size: 0.98em; color: #191919; }
 .chatlog-roomsub { font-size: 0.78em; color: #a8a29a; margin-top: 3px; }
 
-.chatlog-badge {
+.chatlog-room-actions {
     margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+}
+
+.chatlog-badge {
+    margin-left: 0;
     background: #ff4a3d;
     color: #fff;
     font-size: 0.7em;
@@ -145,6 +154,34 @@ body > .chatlog-sheet * {
     text-align: center;
     padding: 0 6px;
 }
+
+.chatlog-room-delete {
+    width: 34px;
+    height: 34px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: #b8b2aa;
+    font-size: 1.55rem;
+    font-weight: 300;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background-color 0.15s ease, color 0.15s ease;
+}
+.chatlog-room-delete:hover,
+.chatlog-room-delete:focus-visible {
+    color: #d94a43;
+    background: #fff0ee;
+    outline: none;
+}
+.chatlog-room-delete:disabled { opacity: 0.45; cursor: wait; }
+
+.chatlog-room-delete-confirm { padding: 8px 4px; text-align: center; }
+.chatlog-room-delete-confirm p { margin: 0 0 10px; font-weight: 650; }
+.chatlog-room-delete-confirm small { color: #8d877f; line-height: 1.5; }
 
 .chatlog-newroom {
     margin-top: 14px;

@@ -1770,6 +1770,31 @@ async function init(router) {
         res.json(room);
     });
 
+    router.post('/room/delete', (req, res) => {
+        const { roomId } = req.body || {};
+        if (!validRecordId(roomId, 'room')) {
+            return res.status(400).json({ error: 'invalid room id' });
+        }
+        const room = db.rooms[roomId];
+        if (!room) return res.status(404).json({ error: 'room not found' });
+
+        const posts = Array.isArray(db.posts[roomId]) ? db.posts[roomId] : [];
+        // 먼저 전부 검증한 뒤 삭제해, 잘못된 경로 하나 때문에 데이터만 일부 지워지는 일을 막는다.
+        const invalidImage = posts.find(post => post?.image && !resolveChatlogImage(post.image, true));
+        if (invalidImage) {
+            return res.status(409).json({
+                error: '방에 안전하게 확인할 수 없는 이미지 경로가 있어 삭제를 중단했습니다',
+            });
+        }
+
+        for (const post of posts) removeImageFile(post?.image);
+        db.jobs = db.jobs.filter(job => job.roomId !== roomId);
+        delete db.posts[roomId];
+        delete db.rooms[roomId];
+        saveDb();
+        res.json({ ok: true, deletedRoomId: roomId, deletedPosts: posts.length });
+    });
+
     router.post('/room/relationships/manual', (req, res) => {
         const { roomId, memberRelations = [], characterRelations } = req.body || {};
         if (!validRecordId(roomId, 'room')) return res.status(400).json({ error: 'invalid room id' });

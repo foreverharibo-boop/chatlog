@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.9.9';
+const CHATLOG_VERSION = '0.9.10';
 const MAX_MANUAL_IMAGE_BYTES = 20 * 1024 * 1024;
 const CARD_SYNC_TEXT_BUDGET_BYTES = 240 * 1024;
 const ROOM_SYNC_TEXT_BUDGET_BYTES = 7 * 1024 * 1024;
@@ -1134,6 +1134,39 @@ function render(options = {}) {
     view.screen === 'rooms' ? renderRooms() : renderFeed(options);
 }
 
+async function confirmRoomDeletion(room) {
+    const c = ctx();
+    if (typeof c.callGenericPopup === 'function' && c.POPUP_TYPE?.CONFIRM !== undefined) {
+        const $message = $('<div class="chatlog-room-delete-confirm"></div>');
+        $('<p>').text('해당 챗로그 방을 없애겠습니까?').appendTo($message);
+        $('<small>').text(`“${room.name}” 방의 게시물과 사진도 함께 삭제됩니다.`).appendTo($message);
+        return Boolean(await c.callGenericPopup(
+            $message[0],
+            c.POPUP_TYPE.CONFIRM,
+            '',
+            { okButton: '네', cancelButton: '아니요' },
+        ));
+    }
+    return window.confirm('해당 챗로그 방을 없애겠습니까?\n방의 게시물과 사진도 함께 삭제됩니다.');
+}
+
+async function deleteRoom(room, $button) {
+    if (!await confirmRoomDeletion(room)) return;
+    if ($button.prop('disabled')) return;
+    $button.prop('disabled', true).addClass('busy');
+    try {
+        await api('/room/delete', { roomId: room.id });
+        delete state.rooms[room.id];
+        delete state.posts[room.id];
+        if (view.roomId === room.id) view = { screen: 'rooms', roomId: null };
+        render();
+        notify('success', '챗로그 방을 삭제했어요.');
+    } catch (error) {
+        notify('error', `방 삭제 실패: ${error.message}`);
+        $button.prop('disabled', false).removeClass('busy');
+    }
+}
+
 // ── 로그 목록 ─────────────────────────────────────────────
 function renderRooms() {
     const $body = $overlay.find('.chatlog-body');
@@ -1158,12 +1191,20 @@ function renderRooms() {
               <div class="chatlog-roomname">${esc(room.name)}</div>
               <div class="chatlog-roomsub">${room.members.length}명 · ${last ? timeLabel(last.createdAt) : '기록 없음'}</div>
             </div>
-            ${unread ? `<span class="chatlog-badge">${unread}</span>` : ''}
+            <div class="chatlog-room-actions">
+              ${unread ? `<span class="chatlog-badge">${unread}</span>` : ''}
+              <button type="button" class="chatlog-room-delete" title="방 삭제" aria-label="${escAttr(room.name)} 방 삭제">&times;</button>
+            </div>
           </div>`);
         $card.on('click', () => {
             markRead(room.id);
             view = { screen: 'feed', roomId: room.id };
             render();
+        });
+        $card.find('.chatlog-room-delete').on('click', async event => {
+            event.preventDefault();
+            event.stopPropagation();
+            await deleteRoom(room, $(event.currentTarget));
         });
         $b.append($card);
     }
