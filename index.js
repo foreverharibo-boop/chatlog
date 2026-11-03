@@ -4,7 +4,7 @@
  */
 
 const API = '/api/plugins/chatlog';
-const CHATLOG_VERSION = '0.9.10';
+const CHATLOG_VERSION = '0.9.11';
 const MAX_MANUAL_IMAGE_BYTES = 20 * 1024 * 1024;
 const CARD_SYNC_TEXT_BUDGET_BYTES = 240 * 1024;
 const ROOM_SYNC_TEXT_BUDGET_BYTES = 7 * 1024 * 1024;
@@ -792,6 +792,7 @@ async function loadRuntimeStatus() {
     try {
         const status = await api('/status');
         $status.html([
+            `<div><b>서버 작업</b><span>${status.enabled === false ? '웹확장 꺼짐 · 중단' : '실행 중'}</span></div>`,
             `<div><b>다음 판단</b><span>${esc(statusTime(status.nextSlotAt))}</span></div>`,
             `<div><b>마지막 성공</b><span>${esc(statusTime(status.lastSuccessAt))}${status.lastSuccess ? ` · ${esc(status.lastSuccess)}` : ''}</span></div>`,
             `<div><b>마지막 오류</b><span class="${status.lastError ? 'error' : ''}" title="${escAttr(status.lastError || '')}">${status.lastError ? `${esc(statusTime(status.lastErrorAt))} · ${esc(compactRuntimeError(status.lastError))}` : '없음'}</span></div>`,
@@ -2380,6 +2381,7 @@ async function runLocal(roomId = null) {
                 charId: job.charId,
                 charName: job.member?.name,
                 text: cleanComment(raw),
+                runtimeEpoch: job.runtimeEpoch,
             });
             ok++;
         } catch (e) {
@@ -2892,3 +2894,4 @@ jQuery(async () => {
     registerSlashCommands();
     console.log(`[chatlog] v${CHATLOG_VERSION} 로드됨 — cl.help() 로 디버그 명령 확인`);
 });
+

@@ -6,6 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const runtimeControl = require('./runtime-control');
 const { findSillyTavernRoot } = require('./paths');
 
 const ST_ROOT = findSillyTavernRoot();
@@ -607,7 +608,7 @@ function googleUrl({
 
 async function callGoogle(cfg, body) {
     if (!cfg?.apiKey) throw new Error('Vertex Express API 키가 비어 있습니다');
-    const res = await fetch(googleUrl(cfg), {
+    const res = await runtimeControl.request(googleUrl(cfg), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -653,7 +654,7 @@ async function getVertexAccessToken(serviceAccount) {
     const signature = crypto.sign('RSA-SHA256', Buffer.from(unsigned), serviceAccount.private_key);
     const assertion = `${unsigned}.${toBase64Url(signature)}`;
 
-    const res = await fetch(tokenUri, {
+    const res = await runtimeControl.request(tokenUri, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
@@ -694,7 +695,7 @@ async function callVertexProfile(api, body) {
         }, body);
     }
     const accessToken = await getVertexAccessToken(api.serviceAccount);
-    const res = await fetch(vertexProfileUrl(api), {
+    const res = await runtimeControl.request(vertexProfileUrl(api), {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -2496,7 +2497,8 @@ async function generateImage(
             console.warn(`[chatlog] 이미지 응답에 데이터 없음 (${attempt.label}):`, summary);
         } catch (e) {
             failures.push(`${attempt.label}: ${e.message}`);
-            if (/(?:401|403|429|quota|billing|permission)/i.test(e.message)) throw e;
+            runtimeControl.checkpoint();
+            if (/(?:400|401|403|404|410|429|quota|billing|permission)/i.test(e.message)) throw e;
         }
     }
     if (!inline) throw new Error(`이미지 데이터 없음 — ${failures.join(' / ')}`);
@@ -2515,6 +2517,7 @@ async function generateImage(
         throw new Error('생성 이미지의 실제 파일 형식을 확인할 수 없습니다');
     }
 
+    runtimeControl.checkpoint();
     const dir = path.join(PUBLIC_ROOT, 'user', 'images', 'chatlog');
     fs.mkdirSync(dir, { recursive: true });
     const dirStat = fs.lstatSync(dir);
@@ -2580,3 +2583,4 @@ module.exports = {
     postPresenceRules,
     violatesPresenceClaim,
 };
+

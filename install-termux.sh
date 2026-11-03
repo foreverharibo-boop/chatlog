@@ -55,6 +55,7 @@ node --check "$SOURCE/index.js"
 node --check "$SOURCE/ai.js"
 node --check "$SOURCE/paths.js"
 node --check "$SOURCE/image-security.js"
+node --check "$SOURCE/runtime-control.js"
 
 printf '\n챗로그 자동 게시 기능은 SillyTavern 서버 플러그인을 사용합니다.\n'
 printf '서버 플러그인은 일반 확장보다 권한이 크므로 신뢰하는 플러그인만 설치해야 합니다.\n'
@@ -127,3 +128,4 @@ printf '\n설치가 완료되었습니다.\n'
 printf '챗로그 설치 백업: %s\n' "$BACKUP_ROOT"
 printf '이제 SillyTavern을 완전히 종료한 뒤 다시 실행하세요:\n'
 printf '  cd "%s" && npm start\n' "$ST_ROOT"
+

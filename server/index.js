@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const net = require('net');
+const runtimeControl = require('./runtime-control');
 const { findSillyTavernRoot } = require('./paths');
 const { stripImagePrivacyMetadata } = require('./image-security');
 
@@ -17,7 +18,13 @@ function reloadAi() {
     _ai = require('./ai');
     return true;
 }
-const ai = new Proxy({}, { get: (_, k) => _ai[k] });
+const generatedActions = new Set([
+    'generateComment', 'generateReaction', 'generateEngagement',
+    'generateCharacterCut', 'generateImage', 'analyzeRoomRelationships',
+]);
+const ai = new Proxy({}, { get: (_, k) => generatedActions.has(k)
+    ? (...args) => runtimeControl.run(() => _ai[k](...args))
+    : _ai[k] });
 
 const DATA_PATH = path.join(__dirname, 'data.json');
 const SETTINGS_PATH = path.join(__dirname, 'settings.json');
@@ -397,6 +404,52 @@ function saveSettings() {
     catch (e) { console.error('[chatlog] 설정 저장 실패:', e.message); }
 }
 
+// Read ST's saved switch even when the browser no longer loads this extension.
+// The configured user's switch also applies to background jobs without a tab open.
+function webExtensionEnabled() {
+    const userDir = ai.userDataDir(settings);
+    const stSettings = loadJson(path.join(userDir, 'settings.json'), null);
+    if (!stSettings?.extension_settings) return false;
+    const disabled = stSettings.extension_settings.disabledExtensions || [];
+    if (!Array.isArray(disabled)) return false;
+    const names = new Set();
+    for (const directory of [
+        path.join(userDir, 'extensions'),
+        path.join(ST_ROOT, 'public', 'scripts', 'extensions', 'third-party'),
+    ]) {
+        let entries;
+        try { entries = fs.readdirSync(directory); } catch { continue; }
+        for (const name of entries) {
+            const manifest = loadJson(path.join(directory, name, 'manifest.json'), null);
+            if (manifest?.display_name === '챗로그' && manifest.js === 'index.js') {
+                names.add(`third-party/${name}`);
+            }
+        }
+    }
+    // No installed web extension (or unreadable settings) means no server work.
+    return names.size > 0 && ![...names].some(name => disabled.includes(name));
+}
+
+function onExtensionStateChanged(enabled, previous) {
+    const wasDisabled = previous === false || db.runtime.extensionEnabled === false;
+    db.runtime.extensionEnabled = enabled;
+    if (!enabled || wasDisabled) {
+        db.jobs = [];
+        const now = Date.now();
+        for (const room of Object.values(db.rooms)) {
+            room.nextSlotAt = enabled ? computeNextSlot(room, now) : null;
+        }
+        db.runtime.lastNoticeAt = now;
+        db.runtime.lastNotice = enabled
+            ? '웹확장 켜짐 · 이전 예약 없이 새 일정부터 시작'
+            : '웹확장 꺼짐 · 진행 중 요청 취소 및 대기 작업 비움';
+        // Persist the discarded queue before a restart can resurrect it.
+        flushDbSave();
+    } else {
+        saveDb();
+    }
+}
+
 function jobLabel(job, result = null) {
     const room = db.rooms[job.roomId];
     const member = room?.members?.find(item => item.avatar === job.charId);
@@ -423,10 +476,12 @@ function markJobError(job, error, retryAt = null) {
 }
 
 function statusPayload() {
+    const enabled = runtimeControl.refresh();
     const nextSlotAt = Object.values(db.rooms)
         .filter(room => !room.paused && Number.isFinite(room.nextSlotAt))
         .reduce((earliest, room) => Math.min(earliest, room.nextSlotAt), Infinity);
     return {
+        enabled,
         serverTime: Date.now(),
         lastTickAt: db.runtime.lastTickAt,
         lastSuccessAt: db.runtime.lastSuccessAt,
@@ -438,7 +493,7 @@ function statusPayload() {
         skippedMissedSlots: db.runtime.skippedMissedSlots,
         pendingJobs: db.jobs.length,
         retryingJobs: db.jobs.filter(job => Number(job.attempts) > 0).length,
-        nextSlotAt: Number.isFinite(nextSlotAt) ? nextSlotAt : null,
+        nextSlotAt: enabled && Number.isFinite(nextSlotAt) ? nextSlotAt : null,
     };
 }
 
@@ -895,6 +950,7 @@ function activeHoursBetween(from, to, schedule = {}) {
 
 // ── 작업 큐 ───────────────────────────────────────────────
 function enqueueEngagement(room, post) {
+    runtimeControl.checkpoint();
     const minMs = Math.max(10 * 1000, settings.commentDelayMinMin * 30000);
     const maxMs = Math.max(minMs, settings.commentDelayMaxMin * 60000);
     const members = shuffled(room.members.filter(member => member.avatar !== post.author));
@@ -1139,7 +1195,8 @@ async function runJob(job) {
 
 function retryableJobError(error) {
     const message = String(error?.message || '');
-    if (/(?:400|401|403|invalid api|api 키|연결 프로필을 찾을 수 없음|프로젝트 ID|화자 ID 검증 실패|참조 프사가 없어|이미지 데이터 없음|이미지를 만들지 못해)/i.test(message)) {
+    if (error?.code === 'CHATLOG_DISABLED'
+        || /(?:400|401|403|404|410|invalid api|api 키|연결 프로필을 찾을 수 없음|프로젝트 ID|화자 ID 검증 실패|참조 프사가 없어|이미지 데이터 없음|이미지를 만들지 못해)/i.test(message)) {
         return false;
     }
     return true;
@@ -1147,10 +1204,13 @@ function retryableJobError(error) {
 
 async function executeJob(job, allowRetry = true) {
     try {
-        const result = await runJob(job);
+        const result = await runtimeControl.run(() => runJob(job));
         markJobSuccess(job, result);
         return result;
     } catch (error) {
+        if (error?.code === 'CHATLOG_DISABLED' || !runtimeControl.refresh()) {
+            return { status: 'cancelled' };
+        }
         const attempts = Number(job.attempts || 0) + 1;
         const canRetry = allowRetry
             && retryableJobError(error)
@@ -1448,12 +1508,15 @@ function skipMissedSlots(room, now) {
 // ── 매분 틱 ───────────────────────────────────────────────
 let ticking = false;
 let tickTimer = null;
+let extensionStateTimer = null;
 async function tick() {
     if (ticking) return;
     ticking = true;
     const now = Date.now();
 
     try {
+        if (!runtimeControl.refresh()) return;
+        const tickSignal = runtimeControl.checkpoint();
         db.runtime.lastTickAt = now;
         for (const room of Object.values(db.rooms)) {
             if (room.paused) continue;
@@ -1497,10 +1560,12 @@ async function tick() {
         if (due.length) {
             db.jobs = db.jobs.filter(j => j.runAt > now);
             for (const job of due) {
+                if (tickSignal.aborted || !runtimeControl.refresh()) break;
                 try { await executeJob(job, true); }
                 catch (e) { console.error('[chatlog] 작업 실패:', job.type, e.message); }
             }
         }
+        if (tickSignal.aborted || !runtimeControl.refresh()) return;
         // 자동 정리는 하루 한 번만
         if (now - lastCleanup > 6 * 3600 * 1000) {
             lastCleanup = now;
@@ -1508,6 +1573,8 @@ async function tick() {
         }
 
         saveDb();
+    } catch (error) {
+        console.error('[chatlog] 스케줄러 실패:', sanitizeRuntimeError(error.message));
     } finally {
         ticking = false;
     }
@@ -1516,6 +1583,7 @@ async function tick() {
 // ── 진입점 ────────────────────────────────────────────────
 async function init(router) {
     loadAll();
+    runtimeControl.configure({ readEnabled: webExtensionEnabled, onChange: onExtensionStateChanged });
 
     // SillyTavern의 로그인·CSRF 보호에 더해, 브라우저에서 다른 출처가
     // 챗로그 관리 API를 호출하는 요청을 한 번 더 거부한다.
@@ -1531,6 +1599,15 @@ async function init(router) {
         next();
     });
     router.use(enforceRequestBudget);
+    router.use((req, res, next) => {
+        const enabled = runtimeControl.refresh();
+        // Settings/reload stay available for repair. Mutating operations, forced
+        // generation, queue claims and stale browser requeues must stop when OFF.
+        if (!enabled && req.method === 'POST' && !['/settings', '/reload'].includes(req.path)) {
+            return res.status(409).json({ error: '챗로그 웹확장이 꺼져 있습니다', code: 'CHATLOG_DISABLED' });
+        }
+        next();
+    });
 
     router.get('/state', (req, res) => res.json({ rooms: db.rooms, posts: db.posts }));
     router.get('/status', (req, res) => res.json(statusPayload()));
@@ -1982,6 +2059,7 @@ async function init(router) {
             const post = j.postId ? findPost(j.roomId, j.postId) : null;
             return {
                 ...j,
+                runtimeEpoch: runtimeControl.currentEpoch(),
                 member,
                 post,
                 roomName: room?.name,
@@ -1994,6 +2072,9 @@ async function init(router) {
         const source = req.body?.job;
         if (!isPlainRecord(source)) {
             return res.status(400).json({ error: 'invalid job' });
+        }
+        if (source.runtimeEpoch !== runtimeControl.currentEpoch()) {
+            return res.status(409).json({ error: '중단되었거나 이전 실행의 작업입니다' });
         }
         if (!source.roomId || !source.charId || !source.type) {
             return res.status(400).json({ error: 'invalid job' });
@@ -2087,6 +2168,9 @@ async function init(router) {
 
     // 클라이언트가 생성한 댓글을 되돌려 넣음
     router.post('/comment/push', (req, res) => {
+        if (req.body?.runtimeEpoch !== runtimeControl.currentEpoch()) {
+            return res.status(409).json({ error: '중단되었거나 이전 실행의 작업입니다' });
+        }
         // charName은 더 이상 클라이언트 값을 신뢰하지 않고 서버 멤버 목록에서 가져온다.
         const { roomId, postId, charId, text } = req.body || {};
         if (!validRecordId(roomId, 'room')) return res.status(400).json({ error: 'invalid room id' });
@@ -2284,7 +2368,9 @@ async function init(router) {
         const done = { comments: 0, reactions: 0, cuts: 0, skipped: 0, errors: [] };
 
         try {
+            const forceSignal = runtimeControl.checkpoint();
             for (const room of rooms) {
+            if (forceSignal.aborted || !runtimeControl.refresh()) return res.json({ ...done, cancelled: true });
             // 1. 대기 중인 댓글 작업 즉시 실행
             if (what === 'all' || what === 'comments') {
                 const pending = db.jobs.filter(job => job.roomId === room.id
@@ -2293,9 +2379,10 @@ async function init(router) {
                         || (job.type === 'engagement' && job.commentWanted === true)));
                 db.jobs = db.jobs.filter(job => !pending.includes(job));
                 for (const job of pending) {
+                    if (forceSignal.aborted || !runtimeControl.refresh()) return res.json({ ...done, cancelled: true });
                     try {
                         const result = await executeJob(job, true);
-                        if (result?.status !== 'retrying') {
+                        if (result?.status !== 'retrying' && result?.status !== 'cancelled') {
                             if (job.type === 'engagement') {
                                 done.comments += result?.commented ? 1 : 0;
                                 done.reactions += result?.reacted ? 1 : 0;
@@ -2313,10 +2400,12 @@ async function init(router) {
 
             // 2. 캐릭터 컷 지금 바로 생성 (스케줄 무시)
             if (what === 'all' || what === 'cut') {
+                if (forceSignal.aborted || !runtimeControl.refresh()) return res.json({ ...done, cancelled: true });
                 const slotAt = Date.now();
                 recordSlot(room, slotAt);
                 const sharedScene = createSharedScenePlan(room, slotAt, room.members);
                 for (const member of room.members) {
+                    if (forceSignal.aborted || !runtimeControl.refresh()) return res.json({ ...done, cancelled: true });
                     try {
                         const result = await executeJob({
                             id: uid('job'),
@@ -2349,9 +2438,10 @@ async function init(router) {
                     && (job.type === 'reaction' || job.type === 'engagement'));
                 db.jobs = db.jobs.filter(job => !pending.includes(job));
                 for (const job of pending) {
+                    if (forceSignal.aborted || !runtimeControl.refresh()) return res.json({ ...done, cancelled: true });
                     try {
                         const result = await executeJob(job, true);
-                        if (result?.status !== 'retrying') {
+                        if (result?.status !== 'retrying' && result?.status !== 'cancelled') {
                             done.reactions += result?.reacted ? 1 : 0;
                             done.comments += result?.commented ? 1 : 0;
                         }
@@ -2418,13 +2508,22 @@ async function init(router) {
 
     if (tickTimer) clearInterval(tickTimer);
     tickTimer = setInterval(tick, TICK_MS);
-    tick();
+    if (extensionStateTimer) clearInterval(extensionStateTimer);
+    extensionStateTimer = setInterval(() => {
+        try { runtimeControl.refresh(); }
+        catch (error) { console.error('[chatlog] 확장 상태 확인 실패:', error.message); }
+    }, 1000);
+    void tick();
     console.log('[chatlog] 플러그인 시작됨');
 }
 
 module.exports = {
     init,
     exit: () => {
+        if (extensionStateTimer) clearInterval(extensionStateTimer);
+        extensionStateTimer = null;
+        // Abort requests without treating a normal server shutdown as OFF.
+        runtimeControl.abort();
         if (tickTimer) {
             clearInterval(tickTimer);
             tickTimer = null;
@@ -2436,3 +2535,4 @@ module.exports = {
     },
     info: { id: 'chatlog', name: 'Chatlog', description: '시간 슬롯 기반 로그 + 캐릭터 지연 댓글' },
 };
+

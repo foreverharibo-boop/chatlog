@@ -63,7 +63,7 @@ if (-not (Test-Path -LiteralPath $Config)) {
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     throw "Node.js를 찾을 수 없습니다. SillyTavern 설치를 먼저 확인하세요."
 }
-foreach ($ServerFile in @("index.js", "ai.js", "paths.js", "image-security.js")) {
+foreach ($ServerFile in @("index.js", "ai.js", "paths.js", "image-security.js", "runtime-control.js")) {
     & node --check (Join-Path $Source $ServerFile)
     if ($LASTEXITCODE -ne 0) { throw "server/$ServerFile 문법 검사에 실패했습니다." }
 }
@@ -177,3 +177,4 @@ Write-Host ""
 Write-Host "설치가 완료되었습니다."
 Write-Host "챗로그 설치 백업: $BackupRoot"
 Write-Host "이제 SillyTavern을 완전히 종료한 뒤 다시 실행하세요."
+
